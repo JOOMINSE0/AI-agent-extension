@@ -1,0 +1,47 @@
+{
+  "name": "ai-approval-agent",
+  "displayName": "AI Approval Agent",
+  "publisher": "minseo",                      
+  "version": "0.0.1",
+  "engines": { "vscode": "^1.80.0" },
+  "main": "./out/extension.js",
+  "activationEvents": [
+    "onView:aiApprovalView",
+    "onCommand:ai-approval-agent.showPanel"
+  ],
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "aiApproval",
+          "title": "Agent",
+          "icon": "media/agent.svg"            
+        }
+      ]
+    },
+    "views": {
+      "aiApproval": [
+        {
+          "id": "aiApprovalView",
+          "name": "AI Approval Panel",
+          "type": "webview"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "ai-approval-agent.showPanel",
+        "title": "Show AI Approval Panel"
+      }
+    ]
+  },
+  "scripts": {
+    "watch": "tsc -watch -p ./",
+    "compile": "tsc -p ./"
+  },
+  "devDependencies": {
+    "@types/node": "^18.0.0",
+    "@types/vscode": "^1.80.0",
+    "typescript": "^5.3.0"
+  }
+}

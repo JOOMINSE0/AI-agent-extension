@@ -1,0 +1,4 @@
+<!-- media/agent.svg -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="#888">
+  <path d="M12 12a5 5 0 1 0-5-5 5 5 0 0 0 5 5Zm0 2c-4.33 0-8 2.17-8 4.84V21h16v-2.16C20 16.17 16.33 14 12 14Z"/>
+</svg>

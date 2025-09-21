@@ -1,0 +1,34 @@
+:root{
+  --fg: var(--vscode-editor-foreground);
+  --bg: var(--vscode-editor-background);
+  --panel: var(--vscode-editorWidget-background);
+  --border: var(--vscode-panel-border);
+  --accent: var(--vscode-button-background);
+  --accent-fg: var(--vscode-button-foreground);
+  --danger: #e64545;
+}
+html,body{height:100%}
+body{margin:0;color:var(--fg);background:var(--bg);
+  font-family:system-ui,-apple-system,"Segoe UI",Roboto,Arial,sans-serif}
+.chat{display:flex;flex-direction:column;height:100vh}
+.chat-header{padding:12px 16px;border-bottom:1px solid var(--border);font-weight:600}
+.chat-body{padding:16px;overflow:auto;display:flex;flex-direction:column;gap:12px}
+.msg{padding:10px 12px;border:1px solid var(--border);border-radius:10px;max-width:680px}
+.msg.user{background:var(--panel)}
+.msg.bot{background:transparent}
+.approval-card{display:flex;gap:12px;border:1px solid var(--border);border-radius:14px;overflow:hidden}
+.approval-card .badge{background:var(--danger);color:#fff;min-width:120px;text-align:center;
+  font-weight:700;display:flex;align-items:center;justify-content:center;padding:12px}
+.approval-card .card-main{padding:12px;flex:1}
+.approval-card h3{margin:0 0 8px}
+.meta{list-style:none;padding:0;margin:0 0 8px;display:flex;gap:10px;font-size:12px;opacity:.8}
+.meters label{display:block;font-size:12px;margin:8px 0 4px}
+progress{width:100%;height:8px}
+.actions{display:flex;gap:8px;margin-top:12px}
+button{border:none;border-radius:8px;padding:8px 12px;background:var(--accent);color:var(--accent-fg);cursor:pointer}
+button.ghost{background:transparent;border:1px solid var(--border);color:var(--fg)}
+button.outline{background:transparent;border:1px solid var(--accent);color:var(--accent)}
+#composer{display:flex;gap:8px;padding:12px;border-top:1px solid var(--border)}
+#composer input{flex:1;padding:10px 12px;border-radius:10px;border:1px solid var(--border);
+  background:var(--panel);color:var(--fg)}
+#composer button{padding:10px 16px}
