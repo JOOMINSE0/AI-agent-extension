@@ -36,9 +36,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.activate = activate;
 exports.deactivate = deactivate;
 const vscode = __importStar(require("vscode"));
-/**
- * 확장 활성화
- */
+/** 확장 활성화 */
 function activate(context) {
     console.log("AI Approval Agent is now active!");
     const provider = new ApprovalViewProvider(context);
@@ -49,9 +47,6 @@ function activate(context) {
         vscode.window.showInformationMessage("AI Approval Panel opened!");
     }));
 }
-/**
- * WebviewViewProvider
- */
 class ApprovalViewProvider {
     ctx;
     constructor(ctx) {
@@ -67,31 +62,33 @@ class ApprovalViewProvider {
         wireMessages(view.webview);
     }
 }
-/**
- * VS Code 설정값 읽기
- */
+/** VS Code 설정값 */
 function getCfg() {
     const cfg = vscode.workspace.getConfiguration();
     return {
-        endpoint: (cfg.get("aiApproval.ollama.endpoint") || "http://127.0.0.1:11434").replace(/\/$/, ""),
-        model: cfg.get("aiApproval.ollama.model") || "llama3"
+        endpoint: (cfg.get("aiApproval.ollama.endpoint") || "http://210.110.103.64:11434").replace(/\/$/, ""),
+        model: cfg.get("aiApproval.ollama.model") || "llama3.1:8b"
     };
 }
-/**
- * Webview ↔ Extension 메시지
- */
+/** Webview ↔ Extension 메시지 */
 function wireMessages(webview) {
     webview.onDidReceiveMessage(async (msg) => {
         switch (msg.type) {
-            case "approve":
-                vscode.window.showInformationMessage("승인되었습니다 ✅");
+            case "approve": {
+                const code = msg?.code ?? "";
+                const language = msg?.language ?? "txt";
+                const filename = msg?.filename ?? null;
+                await handleApproval(code, language, filename);
                 break;
-            case "reject":
-                vscode.window.showWarningMessage("거절되었습니다 ❌");
+            }
+            case "reject": {
+                vscode.window.showWarningMessage("거절되었습니다 ❌ (코드는 저장되지 않았습니다)");
                 break;
-            case "details":
+            }
+            case "details": {
                 vscode.window.showInformationMessage("자세히 보기 클릭됨 ℹ️");
                 break;
+            }
             case "ask": {
                 const { endpoint, model } = getCfg();
                 try {
@@ -101,21 +98,86 @@ function wireMessages(webview) {
                     webview.postMessage({ type: "done" });
                 }
                 catch (e) {
-                    const message = e?.message || String(e);
-                    vscode.window.showErrorMessage(`Ollama 호출 실패: ${message}`);
-                    webview.postMessage({ type: "error", message });
+                    const detail = e?.message || e?.cause?.message || e?.cause?.code || String(e);
+                    vscode.window.showErrorMessage(`Ollama 호출 실패: ${detail}`);
+                    webview.postMessage({ type: "error", message: detail });
                 }
                 break;
             }
         }
     });
 }
-/**
- * Ollama /api/chat 스트리밍 호출
- * 응답은 \n 단위 JSON Line 으로 도착 -> message.content 누적
- */
+/** 승인 시 코드 파일에 쓰기 (자동 파일명/폴더 생성) */
+async function handleApproval(code, language, suggested) {
+    if (!vscode.workspace.workspaceFolders?.length) {
+        vscode.window.showErrorMessage("워크스페이스가 열려 있지 않습니다.");
+        return;
+    }
+    const root = vscode.workspace.workspaceFolders[0].uri;
+    // 1) 파일명 후보: 답변에서 감지된 파일명 > 자동 생성
+    const ext = guessExtension(language);
+    let targetRel = sanitizeRelativePath(suggested) || await nextAutoName(root, ext);
+    // 하위 폴더가 있다면 미리 생성
+    await ensureParentDir(root, targetRel);
+    const fileUri = vscode.Uri.joinPath(root, targetRel);
+    await vscode.workspace.fs.writeFile(fileUri, Buffer.from(code, "utf-8"));
+    vscode.window.showInformationMessage(`승인됨 ✅ → ${targetRel} 저장 완료`);
+    const doc = await vscode.workspace.openTextDocument(fileUri);
+    await vscode.window.showTextDocument(doc);
+}
+/** 언어 → 파일 확장자 */
+function guessExtension(language) {
+    const map = {
+        javascript: "js", typescript: "ts", python: "py",
+        html: "html", css: "css", java: "java",
+        c: "c", cpp: "cpp", tsx: "tsx", jsx: "jsx",
+        json: "json", plaintext: "txt"
+    };
+    const key = (language || "").toLowerCase().trim();
+    return map[key] || (key.match(/^[a-z0-9]+$/) ? key : "txt");
+}
+/** 상대 경로 안전화 (상위폴더 탈출 차단) */
+function sanitizeRelativePath(p) {
+    if (!p)
+        return null;
+    if (p.includes(".."))
+        return null;
+    return p.replace(/^\/+/, "").trim();
+}
+/** 자동 파일명: generated_code_001.ext, 002... (중복 회피) */
+async function nextAutoName(root, ext) {
+    const base = "generated_code";
+    for (let i = 1; i <= 9999; i++) {
+        const name = `${base}_${String(i).padStart(3, "0")}.${ext}`;
+        const uri = vscode.Uri.joinPath(root, name);
+        try {
+            await vscode.workspace.fs.stat(uri);
+            // 존재하면 계속 증가
+        }
+        catch {
+            return name; // 없으면 이 이름 사용
+        }
+    }
+    return `${base}_${Date.now()}.${ext}`;
+}
+/** 상위 디렉토리 생성 */
+async function ensureParentDir(root, relPath) {
+    const parts = relPath.split("/").slice(0, -1);
+    if (!parts.length)
+        return;
+    let cur = root;
+    for (const part of parts) {
+        cur = vscode.Uri.joinPath(cur, part);
+        try {
+            await vscode.workspace.fs.stat(cur);
+        }
+        catch {
+            await vscode.workspace.fs.createDirectory(cur);
+        }
+    }
+}
+/** Ollama 채팅 */
 async function chatWithOllama(endpoint, model, userText, onDelta) {
-    // Node18의 fetch 사용 (타입 경고 피하기 위해 any로 받음)
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const fetchFn = globalThis.fetch;
     if (!fetchFn)
@@ -153,17 +215,14 @@ async function chatWithOllama(endpoint, model, userText, onDelta) {
                 const piece = obj?.message?.content || "";
                 if (piece)
                     onDelta(piece);
-                // obj.done === true 이면 서버가 끝을 알린 것
             }
             catch {
-                // 불완전한 줄은 다음 chunk와 합쳐서 다시 파싱
+                /* partial line; continue */
             }
         }
     }
 }
-/**
- * Webview HTML
- */
+/** HTML */
 function getHtml(webview, ctx, nonce) {
     const base = vscode.Uri.joinPath(ctx.extensionUri, "src", "webview");
     const js = webview.asWebviewUri(vscode.Uri.joinPath(base, "main.js"));
@@ -186,37 +245,15 @@ function getHtml(webview, ctx, nonce) {
 </head>
 <body>
   <section class="chat">
-    <div class="chat-header">Fix module not found errors</div>
+    <div class="chat-header">AI Approval Agent</div>
 
-    <div class="chat-body" id="chat">
-      <div class="msg user">sql<br/><code>SELECT * FROM USERS;</code></div>
-      <div class="msg bot">좋습니다! 새 사용자가 성공적으로 등록되었습니다. 이제 로그인을 테스트해볼게요.</div>
-
-      <div class="approval-card critical">
-        <div class="badge">CRITICAL<br/>승인 필수</div>
-        <div class="card-main">
-          <h3>Change a prove</h3>
-          <ul class="meta">
-            <li>보안/인증</li>
-            <li>DB 스키마 변경</li>
-            <li>점수 6</li>
-          </ul>
-
-          <div class="actions">
-            <button id="approve">승인</button>
-            <button id="reject" class="ghost">거절</button>
-            <button id="details" class="outline">자세히 보기</button>
-          </div>
-        </div>
-      </div>
-    </div>
+    <div class="chat-body" id="chat"></div>
 
     <form id="composer">
-      <input id="prompt" type="text" placeholder="Plan, search, build anything" />
+      <input id="prompt" type="text" placeholder="예) express 서버 초기 코드 만들어줘" />
       <button type="submit">Send</button>
     </form>
   </section>
-
   <script nonce="${nonce}" src="${js}"></script>
 </body>
 </html>`;
