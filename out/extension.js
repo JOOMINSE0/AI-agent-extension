@@ -37,7 +37,7 @@ exports.activate = activate;
 exports.deactivate = deactivate;
 const vscode = __importStar(require("vscode"));
 /**
- * 확장이 활성화될 때 실행됨
+ * 확장 활성화
  */
 function activate(context) {
     console.log("AI Approval Agent is now active!");
@@ -50,7 +50,7 @@ function activate(context) {
     }));
 }
 /**
- * WebviewViewProvider 클래스
+ * WebviewViewProvider
  */
 class ApprovalViewProvider {
     ctx;
@@ -60,9 +60,7 @@ class ApprovalViewProvider {
     resolveWebviewView(view) {
         view.webview.options = {
             enableScripts: true,
-            localResourceRoots: [
-                vscode.Uri.joinPath(this.ctx.extensionUri, "src", "webview")
-            ]
+            localResourceRoots: [vscode.Uri.joinPath(this.ctx.extensionUri, "src", "webview")]
         };
         const nonce = getNonce();
         view.webview.html = getHtml(view.webview, this.ctx, nonce);
@@ -70,7 +68,101 @@ class ApprovalViewProvider {
     }
 }
 /**
- * HTML 생성
+ * VS Code 설정값 읽기
+ */
+function getCfg() {
+    const cfg = vscode.workspace.getConfiguration();
+    return {
+        endpoint: (cfg.get("aiApproval.ollama.endpoint") || "http://127.0.0.1:11434").replace(/\/$/, ""),
+        model: cfg.get("aiApproval.ollama.model") || "llama3"
+    };
+}
+/**
+ * Webview ↔ Extension 메시지
+ */
+function wireMessages(webview) {
+    webview.onDidReceiveMessage(async (msg) => {
+        switch (msg.type) {
+            case "approve":
+                vscode.window.showInformationMessage("승인되었습니다 ✅");
+                break;
+            case "reject":
+                vscode.window.showWarningMessage("거절되었습니다 ❌");
+                break;
+            case "details":
+                vscode.window.showInformationMessage("자세히 보기 클릭됨 ℹ️");
+                break;
+            case "ask": {
+                const { endpoint, model } = getCfg();
+                try {
+                    await chatWithOllama(endpoint, model, msg.text, (delta) => {
+                        webview.postMessage({ type: "delta", text: delta });
+                    });
+                    webview.postMessage({ type: "done" });
+                }
+                catch (e) {
+                    const message = e?.message || String(e);
+                    vscode.window.showErrorMessage(`Ollama 호출 실패: ${message}`);
+                    webview.postMessage({ type: "error", message });
+                }
+                break;
+            }
+        }
+    });
+}
+/**
+ * Ollama /api/chat 스트리밍 호출
+ * 응답은 \n 단위 JSON Line 으로 도착 -> message.content 누적
+ */
+async function chatWithOllama(endpoint, model, userText, onDelta) {
+    // Node18의 fetch 사용 (타입 경고 피하기 위해 any로 받음)
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const fetchFn = globalThis.fetch;
+    if (!fetchFn)
+        throw new Error("fetch가 지원되지 않는 런타임입니다.");
+    const res = await fetchFn(`${endpoint}/api/chat`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+            model,
+            stream: true,
+            messages: [
+                { role: "system", content: "You are a helpful coding assistant inside VS Code." },
+                { role: "user", content: userText }
+            ]
+        })
+    });
+    if (!res.ok || !res.body)
+        throw new Error(`HTTP ${res.status}`);
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder("utf-8");
+    let buf = "";
+    while (true) {
+        const { value, done } = await reader.read();
+        if (done)
+            break;
+        buf += decoder.decode(value, { stream: true });
+        let idx;
+        while ((idx = buf.indexOf("\n")) >= 0) {
+            const line = buf.slice(0, idx).trim();
+            buf = buf.slice(idx + 1);
+            if (!line)
+                continue;
+            try {
+                const obj = JSON.parse(line);
+                const piece = obj?.message?.content || "";
+                if (piece)
+                    onDelta(piece);
+                // obj.done === true 이면 서버가 끝을 알린 것
+            }
+            catch {
+                // 불완전한 줄은 다음 chunk와 합쳐서 다시 파싱
+            }
+        }
+    }
+}
+/**
+ * Webview HTML
  */
 function getHtml(webview, ctx, nonce) {
     const base = vscode.Uri.joinPath(ctx.extensionUri, "src", "webview");
@@ -98,7 +190,7 @@ function getHtml(webview, ctx, nonce) {
 
     <div class="chat-body" id="chat">
       <div class="msg user">sql<br/><code>SELECT * FROM USERS;</code></div>
-      <div class="msg bot">좋습니다! 새 사용자가 성공적으로 등록되었습니다.</div>
+      <div class="msg bot">좋습니다! 새 사용자가 성공적으로 등록되었습니다. 이제 로그인을 테스트해볼게요.</div>
 
       <div class="approval-card critical">
         <div class="badge">CRITICAL<br/>승인 필수</div>
@@ -109,6 +201,7 @@ function getHtml(webview, ctx, nonce) {
             <li>DB 스키마 변경</li>
             <li>점수 6</li>
           </ul>
+
           <div class="actions">
             <button id="approve">승인</button>
             <button id="reject" class="ghost">거절</button>
@@ -128,37 +221,11 @@ function getHtml(webview, ctx, nonce) {
 </body>
 </html>`;
 }
-/**
- * Webview → Extension 메시지 핸들링
- */
-function wireMessages(webview) {
-    webview.onDidReceiveMessage((msg) => {
-        switch (msg.type) {
-            case "approve":
-                vscode.window.showInformationMessage("승인되었습니다 ✅");
-                break;
-            case "reject":
-                vscode.window.showWarningMessage("거절되었습니다 ❌");
-                break;
-            case "details":
-                vscode.window.showInformationMessage("자세히 보기 클릭됨 ℹ️");
-                break;
-        }
-    });
-}
-/**
- * CSP 안전용 nonce 생성
- */
+/** CSP nonce */
 function getNonce() {
-    let text = "";
-    const possible = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
-    for (let i = 0; i < 16; i++) {
-        text += possible.charAt(Math.floor(Math.random() * possible.length));
-    }
-    return text;
+    const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+    return Array.from({ length: 32 }, () => chars[Math.floor(Math.random() * chars.length)]).join("");
 }
-/**
- * 확장 비활성화될 때 실행됨
- */
+/** 비활성화 */
 function deactivate() { }
 //# sourceMappingURL=extension.js.map

@@ -1,7 +1,7 @@
 {
   "name": "ai-approval-agent",
   "displayName": "AI Approval Agent",
-  "publisher": "minseo",                      
+  "publisher": "minseo",
   "version": "0.0.1",
   "engines": { "vscode": "^1.80.0" },
   "main": "./out/extension.js",
@@ -15,7 +15,7 @@
         {
           "id": "aiApproval",
           "title": "Agent",
-          "icon": "media/agent.svg"            
+          "icon": "media/agent.svg"
         }
       ]
     },
@@ -33,7 +33,22 @@
         "command": "ai-approval-agent.showPanel",
         "title": "Show AI Approval Panel"
       }
-    ]
+    ],
+    "configuration": {
+      "title": "AI Approval Agent",
+      "properties": {
+        "aiApproval.ollama.endpoint": {
+          "type": "string",
+          "default": "http://210.110.103.64:11434",
+          "description": "Ollama server URL (기본: 학교 VPN 서버)"
+        },
+        "aiApproval.ollama.model": {
+          "type": "string",
+          "default": "llama3.1:8b",
+          "description": "Ollama model name (예: llama3.1:8b, mistral, qwen:7b)"
+        }
+      }
+    }
   },
   "scripts": {
     "watch": "tsc -watch -p ./",
