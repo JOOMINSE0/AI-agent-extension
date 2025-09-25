@@ -1,6 +1,55 @@
+/* 기본 메시지 스타일 */
+.msg {
+  margin: 6px 0;
+  padding: 6px 10px;
+  border-radius: 6px;
+  max-width: 90%;
+  line-height: 1.4;
+  word-wrap: break-word;
+}
+
+.msg.user {
+  background: #007acc;
+  color: white;
+  align-self: flex-end;
+}
+
+.msg.bot {
+  background: #2d2d2d;
+  color: #f0f0f0;
+  align-self: flex-start;
+}
+
+/* 승인 카드 */
+.approval-card {
+  border: 1px solid var(--vscode-editorWidget-border, #555);
+  border-radius: 12px;
+  margin: 10px 0;
+  padding: 12px;
+  background: var(--vscode-editorWidget-background, #1e1e1e);
+  color: var(--vscode-editor-foreground, #ddd);
+}
+
+.approval-card .badge {
+  float: right;
+  font-size: 11px;
+  padding: 4px 6px;
+  border-radius: 6px;
+  background: #444;
+  text-align: center;
+  line-height: 1.2;
+  font-weight: bold;
+  color: #eee;
+}
+
+.approval-card .card-main {
+  clear: both;
+}
+
+/* 코드 미리보기 */
 pre.code-preview {
-  background: var(--panel);
-  border: 1px solid var(--border);
+  background: var(--vscode-editor-background, #1e1e1e);
+  border: 1px solid var(--vscode-editorWidget-border, #555);
   border-radius: 10px;
   padding: 10px;
   overflow: auto;
@@ -10,4 +59,61 @@ pre.code-preview {
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
   font-size: 12px;
   line-height: 1.4;
+  margin-top: 8px;
+}
+
+/* 점수 배너 */
+.score-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  border-radius: 8px;
+  padding: 6px 10px;
+  margin-bottom: 8px;
+  color: white;
+  font-weight: bold;
+}
+
+.score-banner .score-value {
+  font-size: 18px;
+  margin-right: 8px;
+}
+
+.score-banner.red {
+  background: #8b0000;
+}
+.score-banner.yellow {
+  background: #b8860b;
+}
+.score-banner.green {
+  background: #006400;
+}
+
+/* 버튼 영역 */
+.approval-card .actions {
+  margin-top: 10px;
+  display: flex;
+  gap: 8px;
+}
+
+.approval-card button {
+  padding: 6px 12px;
+  border-radius: 6px;
+  border: none;
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.approval-card button.approve-btn {
+  background: #0e639c;
+  color: white;
+}
+.approval-card button.reject-btn {
+  background: #333;
+  color: #ddd;
+}
+.approval-card button.details-btn {
+  background: transparent;
+  border: 1px solid #777;
+  color: #ccc;
 }
