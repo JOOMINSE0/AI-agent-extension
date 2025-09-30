@@ -37,13 +37,11 @@ exports.activate = activate;
 exports.deactivate = deactivate;
 const vscode = __importStar(require("vscode"));
 /**
- * AI Approval Agent - extension.ts
- * - Ollama 스트리밍 호출
- * - 생성된 응답에 대해 분석(analyzeGeneratedText)
- * - vector/score 계산 후 webview로 전송
- * - 승인 시 파일 저장 (자동 파일명/폴더 생성)
+ * AI Approval Agent
+ * - Ollama 스트리밍
+ * - 휴리스틱 + LLM 자가평가(JSON) 융합
+ * - 승인: 코드 저장 또는 터미널 명령 실행
  */
-/** 활성화 */
 function activate(context) {
     console.log("AI Approval Agent is now active!");
     const provider = new ApprovalViewProvider(context);
@@ -69,7 +67,7 @@ class ApprovalViewProvider {
         wireMessages(view.webview);
     }
 }
-/** 설정 읽기 */
+/* ---------- Config ---------- */
 function getCfg() {
     const cfg = vscode.workspace.getConfiguration();
     return {
@@ -77,64 +75,59 @@ function getCfg() {
         model: cfg.get("aiApproval.ollama.model") || "llama3.1:8b"
     };
 }
-/** 메시지 처리(웹뷰 -> 확장) */
+/* ---------- Webview messaging ---------- */
 function wireMessages(webview) {
     webview.onDidReceiveMessage(async (msg) => {
         try {
             switch (msg.type) {
                 case "approve": {
-                    // note: webview sends score/severity as part of payload
-                    const code = msg?.code ?? "";
-                    const language = msg?.language ?? "plaintext";
-                    const filename = msg?.filename ?? null;
-                    const score = typeof msg?.score === "number" ? msg.score : null;
-                    const severity = msg?.severity ?? null;
-                    // If severity is red, show modal confirmation
+                    const { code = "", language = "plaintext", filename = null, score = null, severity = null } = msg || {};
                     if (severity === "red") {
-                        const confirmed = await vscode.window.showWarningMessage(`이 변경은 높은 위험 점수(${score})입니다. 정말 저장하시겠습니까?`, { modal: true }, "확인", "취소");
-                        if (confirmed !== "확인") {
-                            vscode.window.showInformationMessage("승인 취소됨");
+                        const ok = await vscode.window.showWarningMessage(`이 변경은 높은 위험 점수(${score})입니다. 정말 저장/실행하시겠습니까?`, { modal: true }, "확인", "취소");
+                        if (ok !== "확인")
                             return;
-                        }
                     }
                     await handleApproval(code, language, filename);
                     break;
                 }
                 case "reject": {
-                    vscode.window.showWarningMessage("거절되었습니다 ❌ (코드는 저장되지 않았습니다)");
+                    vscode.window.showWarningMessage("거절되었습니다 ❌ (저장/실행 안 함)");
                     break;
                 }
                 case "details": {
-                    // 아직 간단히 알림 처리 (확장 확장 가능)
-                    vscode.window.showInformationMessage("자세히 보기: 확장에서 추가 동작을 구현할 수 있습니다.");
+                    vscode.window.showInformationMessage("자세히 보기: 사유는 카드에 표시됩니다. (확장 쪽 추가 액션 가능)");
                     break;
                 }
                 case "ask": {
                     const { endpoint, model } = getCfg();
-                    // accumulate response text on extension side so we can analyze
                     try {
+                        // 1) 스트리밍 + 전체 텍스트 수집
                         const fullText = await chatWithOllamaAndReturn(endpoint, model, msg.text, (delta) => {
-                            // forward tokens to webview for streaming UI
                             webview.postMessage({ type: "delta", text: delta });
                         });
-                        // extract last code block (if any)
-                        const snippet = extractLastCodeBlock(fullText); // { language, code } | null
-                        // detect suggested filename from fullText
+                        // 2) 사용자 프롬프트를 포함해서 분석(위험 의도 반영)
+                        const combined = `USER:\n${msg.text}\n\nASSISTANT:\n${fullText}`;
+                        // 3) 마지막 코드블록 추출 + 파일명 힌트
+                        const snippet = extractLastCodeBlockTS(fullText); // 코드블록은 답변에서 추출
                         const suggested = detectSuggestedFileName(fullText, snippet?.language ?? "plaintext");
-                        // analyze (vector)
-                        const analysis = analyzeGeneratedText(fullText, snippet?.code ?? "", suggested);
-                        const scored = scoreFromVector(analysis.vector);
-                        // send analysis info to webview (vector, score, severity, suggested filename)
+                        // 4) 휴리스틱
+                        const heur = analyzeGeneratedText(combined, snippet?.code ?? "", suggested);
+                        // 5) LLM 자가평가(JSON)
+                        const llm = await llmSelfJudgeJSON(endpoint, model, combined, snippet?.code ?? "");
+                        // 6) 융합
+                        const fusedVector = fuseVector(heur.vector, llm);
+                        const scored = scoreFromVector(fusedVector);
+                        // 7) 웹뷰로 전달 (자가평가 사유 포함)
                         webview.postMessage({
                             type: "analysis",
-                            vector: analysis.vector,
+                            vector: fusedVector,
                             score: scored.score,
                             severity: scored.severity,
                             suggestedFilename: suggested || null,
                             language: snippet?.language ?? "plaintext",
-                            code: snippet?.code ?? ""
+                            code: snippet?.code ?? "",
+                            reasons: llm?.reasons || {}
                         });
-                        // finally notify done (webview will present approval card if code exists)
                         webview.postMessage({ type: "done" });
                     }
                     catch (e) {
@@ -148,14 +141,14 @@ function wireMessages(webview) {
             }
         }
         catch (e) {
-            console.error("webview message error:", e);
             const detail = e?.message || String(e);
-            webview.postMessage({ type: "error", message: detail });
+            console.error(detail);
             vscode.window.showErrorMessage(detail);
+            webview.postMessage({ type: "error", message: detail });
         }
     });
 }
-/** === Ollama 호출 (스트리밍) + 전체 텍스트를 문자열로 반환 === */
+/* ---------- Ollama chat (stream + return full text) ---------- */
 async function chatWithOllamaAndReturn(endpoint, model, userText, onDelta) {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const fetchFn = globalThis.fetch;
@@ -199,45 +192,140 @@ async function chatWithOllamaAndReturn(endpoint, model, userText, onDelta) {
                 }
             }
             catch {
-                // partial line; continue
+                /* ignore partial */
             }
         }
     }
     return full;
 }
-/** === 분석(heuristic) 및 스코어링 === */
+/* ---------- LLM Self-Judge(JSON) ---------- */
+async function llmSelfJudgeJSON(endpoint, model, fullText, code) {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const fetchFn = globalThis.fetch;
+    const res = await fetchFn(`${endpoint}/api/chat`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+            model,
+            stream: false,
+            messages: [
+                {
+                    role: "system",
+                    content: `You are a code change risk auditor. Return STRICT JSON only. No prose. 
+Keys and ranges:
+{
+ "function_change": 0..1,
+ "stability_risk": 0..1,
+ "security_dependency": 0..1,
+ "reasons": {
+   "function_change": "short reason",
+   "stability_risk": "short reason",
+   "security_dependency": "short reason"
+ }
+}
+Interpretation:
+- function_change: schema/core-purpose changes, main/server/index/core rewrite ↑
+- stability_risk: infinite loops, heavy resources, fragile logic ↑
+- security_dependency: new/vulnerable deps, eval/exec, credentials, SQL dangerous changes ↑`
+                },
+                {
+                    role: "user",
+                    content: `Analyze this assistant answer & code.
+
+# ASSISTANT_TEXT
+${fullText}
+
+# CODE
+\`\`\`
+${code}
+\`\`\`
+
+Return JSON ONLY.`
+                }
+            ]
+        })
+    });
+    if (!res.ok)
+        return null;
+    const data = await res.json();
+    const text = data?.message?.content?.trim?.() ?? "";
+    try {
+        return JSON.parse(text);
+    }
+    catch {
+        return null;
+    }
+}
+/* ---------- Fuse Heuristic + LLM ---------- */
+function fuseVector(heur, // [F,R,S]
+llm) {
+    if (!llm)
+        return heur;
+    const v2 = [llm.function_change, llm.stability_risk, llm.security_dependency];
+    const alpha = 0.6; // 휴리스틱 60% + LLM 40%
+    return [
+        alpha * heur[0] + (1 - alpha) * v2[0],
+        alpha * heur[1] + (1 - alpha) * v2[1],
+        alpha * heur[2] + (1 - alpha) * v2[2]
+    ];
+}
+/* ---------- Heuristic analysis (강화판) ---------- */
 function analyzeGeneratedText(fullText, code, filename) {
-    // F: Function change
+    const whole = (fullText + "\n" + code);
+    // F: 기능/목적 변경
     let F = 0;
     const funcKeywords = /\b(replace|rewrite|refactor|rework|rewrite core|change core|alter core|replace core)\b/i;
-    if (funcKeywords.test(fullText))
+    if (funcKeywords.test(whole))
         F += 0.6;
     if (filename && /(?:^|\/)(?:main|server|app|index|core)\.[a-z0-9]+$/i.test(filename))
         F = Math.min(1, F + 0.3);
     if (code.length > 2000)
         F = Math.min(1, F + 0.2);
-    // R: Stability / resource risk
+    // R: 안정성/자원
     let R = 0;
     const heavyPatterns = /\b(while\s*\(|for\s*\(|sleep\(|thread|fork|subprocess|multiprocessing|spawn|map_reduce|batch|malloc|calloc|new\s+[A-Z])/i;
-    if (heavyPatterns.test(code + " " + fullText))
+    if (heavyPatterns.test(whole))
         R += 0.4;
     if (code.split("\n").length > 200)
         R = Math.min(1, R + 0.2);
-    // S: Security / dependency
+    // S: 보안/의존성 + SQL 보강
     let S = 0;
-    const depMatches = Array.from((fullText + " " + code).matchAll(/(?:import\s+([a-z0-9_.\-]+)|require\(['"]([a-z0-9_.\-]+)['"]\))/ig));
+    const depMatches = Array.from(whole.matchAll(/(?:import\s+([a-z0-9_.\-]+)|require\(['"]([a-z0-9_.\-]+)['"]\))/ig));
     if (depMatches.length > 0)
         S += Math.min(0.6, 0.15 * depMatches.length);
-    if (/\beval\(|exec\(|system\(|popen\(|open\([^,]*\/etc\/passwd|sshpass\b/i.test(code + " " + fullText))
+    if (/\beval\(|exec\(|system\(|popen\(|open\([^,]*\/etc\/passwd|sshpass\b/i.test(whole))
         S = Math.min(1, S + 0.6);
+    // SQL/비밀번호 관련
+    const hasSQLDDL = /\b(ALTER\s+TABLE|CREATE\s+TABLE|DROP\s+TABLE|ALTER\s+COLUMN|ADD\s+COLUMN)\b/i.test(whole);
+    const touchesUserTable = /\b(mysql\.user|users?\b|accounts?\b|credentials?\b)\b/i.test(whole);
+    const addsPasswordCol = /\bADD\s+COLUMN\s+`?password`?\b/i.test(whole);
+    const updatesPassword = /\bUPDATE\s+[^\s`]+(?:\s+SET|\s+SET\s+)+[^;]*\b`?password`?\b/i.test(whole);
+    const mentionsPlain = /\b(plain\s*text|평문)\b/i.test(whole) || /\bCHAR\s*\(|\bVARCHAR\s*\(|\bTEXT\b/i.test(whole);
+    const usesHashing = /\b(bcrypt|argon2|scrypt|pbkdf2|sha\d{1,3})\b/i.test(whole);
+    const touchesSystemUsr = /\bmysql\.user\b/i.test(whole);
+    if (hasSQLDDL && touchesUserTable) {
+        F = Math.min(1, F + 0.5);
+        S = Math.min(1, S + 0.3);
+    }
+    if (addsPasswordCol || updatesPassword)
+        S = Math.min(1, S + 0.6);
+    // "평문" 언급 + password 관련 작업 → 강하게 가중. (해시 포함 시 과도 상승 방지)
+    if ((addsPasswordCol || updatesPassword || /password/i.test(whole)) && mentionsPlain && !usesHashing) {
+        S = Math.min(1, S + 0.7);
+        if (S < 0.6)
+            S = 0.6; // 최소 바닥선
+    }
+    if (touchesSystemUsr)
+        S = Math.min(1, S + 0.8);
     F = Math.min(1, Math.max(0, F));
     R = Math.min(1, Math.max(0, R));
     S = Math.min(1, Math.max(0, S));
     return { vector: [F, R, S], code, filename };
 }
 function scoreFromVector(v) {
-    const w = [0.4, 0.35, 0.25];
-    const raw = v[0] * w[0] + v[1] * w[1] + v[2] * w[2]; // 0..1
+    // 보안 비중을 더 주고 싶다면 [0.35, 0.30, 0.35]로 조정 가능
+    const w = [0.30, 0.10, 0.60];
+    const raw = v[0] * w[0] + v[1] * w[1] + v[2] * w[2];
     const score = Math.round(raw * 100);
     let severity = "green";
     if (score >= 70)
@@ -246,78 +334,53 @@ function scoreFromVector(v) {
         severity = "yellow";
     return { score, severity };
 }
-/** === 유틸: 코드 블록 추출 (마지막 블록) === */
-function extractLastCodeBlock(text) {
-    const regex = /```([\s\S]*?)```/g;
-    let match;
-    let last = null;
-    while ((match = regex.exec(text)) !== null)
-        last = match[1];
-    if (!last)
-        return null;
-    const nl = last.indexOf("\n");
-    if (nl > -1) {
-        const maybeLang = last.slice(0, nl).trim();
-        const body = last.slice(nl + 1);
-        if (/^[a-zA-Z0-9+#._-]{0,20}$/.test(maybeLang)) {
-            return { language: maybeLang || "plaintext", code: body };
-        }
-    }
-    return { language: "plaintext", code: last };
-}
-/** === 유틸: 파일명 힌트 감지 === */
-function detectSuggestedFileName(fullText, fallbackLang) {
-    const re = /(?:file\s*[:=]\s*|create\s*|\bmake\s*|\bsave\s*as\s*|\b파일(?:명|을)?\s*(?:은|을)?\s*|^|\s)([A-Za-z0-9_\-./]+?\.[A-Za-z0-9]{1,8})/gi;
+/* ---------- Filename hint ---------- */
+function detectSuggestedFileName(fullText, _fallbackLang) {
+    const re = /(?:file\s*[:=]\s*|create\s*|\bmake\s*|\bsave\s*as\s*|\b파일(?:명|을)?\s*(?:은|을)?\s*)([A-Za-z0-9_\-./]+?\.[A-Za-z]{1,8})/gi;
     let m;
     let last = null;
     while ((m = re.exec(fullText)) !== null)
         last = m[1];
     if (!last)
         return null;
-    if (!/\.[A-Za-z0-9]{1,8}$/.test(last))
+    const extMatch = last.match(/\.([A-Za-z0-9]{1,8})$/);
+    if (!extMatch)
         return null;
+    const ext = extMatch[1];
+    if (!/[A-Za-z]/.test(ext))
+        return null; // 확장자에 영문 1자 이상
+    if (/^\d+(\.\d+)+$/.test(last))
+        return null; // 순수 버전번호 문자열 제외
     if (last.includes(".."))
-        return null;
-    // optional: filter extreme mismatches (not strict)
-    if (fallbackLang && fallbackLang.toLowerCase() === "html" && last.toLowerCase().endsWith(".py"))
         return null;
     return last.replace(/^\/+/, "");
 }
-/** 파일 저장 관련 (자동 이름/폴더 생성) */
-/** 승인 시 코드 파일에 쓰기 또는 터미널에서 실행 (자동 파일명/폴더 생성) */
+/* ---------- Approval: terminal-or-file ---------- */
 async function handleApproval(code, language, suggested) {
     if (!vscode.workspace.workspaceFolders?.length) {
         vscode.window.showErrorMessage("워크스페이스가 열려 있지 않습니다.");
         return;
     }
-    // --- 1) 명령어인지 감지 (터미널로 보낼지 판단) ---
+    // 터미널 명령 감지
     const shellCmdPattern = /^(npm|yarn|pip|pip3|pnpm|apt|apt-get|brew|git|chmod|chown|sudo|rm|mv|cp|mkdir|rmdir|systemctl|service)\b/i;
     const firstLine = (code || "").trim().split(/\r?\n/)[0] || "";
     const looksLikeShell = language === "bash" || language === "sh" || shellCmdPattern.test(firstLine);
     if (looksLikeShell) {
-        // 안전 확인(모달)
-        const confirm = await vscode.window.showWarningMessage("발견된 내용이 터미널 명령어로 보입니다. 통합 터미널에서 실행하시겠습니까?", { modal: true }, "실행", "취소");
-        if (confirm !== "실행") {
-            vscode.window.showInformationMessage("터미널 실행이 취소되었습니다.");
+        const confirm = await vscode.window.showWarningMessage("터미널 명령으로 감지되었습니다. 통합 터미널에서 실행할까요?", { modal: true }, "실행", "취소");
+        if (confirm !== "실행")
             return;
-        }
-        // 새로운 또는 기존 터미널 사용
         const termName = "AI Approval Agent";
         let terminal = vscode.window.terminals.find(t => t.name === termName);
-        if (!terminal) {
+        if (!terminal)
             terminal = vscode.window.createTerminal({ name: termName });
-        }
         terminal.show(true);
-        // 여러 줄이면 한 줄씩 실행 (주석/빈줄은 건너뜀)
-        const lines = code.split(/\r?\n/).map(l => l.trim()).filter(l => l.length > 0 && !l.startsWith("#"));
-        for (const line of lines) {
-            // 안전을 위해 한 줄씩 실행 (추가로 필요하면 사용자에게 보여주거나 로그 기록 가능)
-            terminal.sendText(line, true); // addNewLine=true -> 실행
-        }
-        vscode.window.showInformationMessage(`터미널에서 명령을 실행했습니다 (${lines.length} 줄).`);
+        const lines = code.split(/\r?\n/).map(l => l.trim()).filter(l => l && !l.startsWith("#"));
+        for (const line of lines)
+            terminal.sendText(line, true);
+        vscode.window.showInformationMessage(`터미널에서 ${lines.length}개 명령을 실행했습니다.`);
         return;
     }
-    // --- 2) 일반 코드 파일로 저장(기존 로직) ---
+    // 일반 코드 저장
     const root = vscode.workspace.workspaceFolders[0].uri;
     const ext = guessExtension(language);
     const targetRel = sanitizeRelativePath(suggested) || (await nextAutoName(root, ext));
@@ -329,20 +392,13 @@ async function handleApproval(code, language, suggested) {
     const doc = await vscode.workspace.openTextDocument(fileUri);
     await vscode.window.showTextDocument(doc);
 }
+/* ---------- Fs utils ---------- */
 function guessExtension(language) {
     const map = {
-        javascript: "js",
-        typescript: "ts",
-        python: "py",
-        html: "html",
-        css: "css",
-        java: "java",
-        c: "c",
-        cpp: "cpp",
-        tsx: "tsx",
-        jsx: "jsx",
-        json: "json",
-        plaintext: "txt"
+        javascript: "js", typescript: "ts", python: "py",
+        html: "html", css: "css", java: "java",
+        c: "c", cpp: "cpp", tsx: "tsx", jsx: "jsx",
+        json: "json", plaintext: "txt", bash: "sh", sh: "sh"
     };
     const key = (language || "").toLowerCase().trim();
     return map[key] || (key.match(/^[a-z0-9]+$/) ? key : "txt");
@@ -383,7 +439,7 @@ async function ensureParentDir(root, relPath) {
         }
     }
 }
-/** getHtml / getNonce (unchanged) */
+/* ---------- HTML / Nonce ---------- */
 function getHtml(webview, ctx, nonce) {
     const base = vscode.Uri.joinPath(ctx.extensionUri, "src", "webview");
     const js = webview.asWebviewUri(vscode.Uri.joinPath(base, "main.js"));
@@ -407,11 +463,9 @@ function getHtml(webview, ctx, nonce) {
 <body>
   <section class="chat">
     <div class="chat-header">AI Approval Agent</div>
-
     <div class="chat-body" id="chat">
       <div class="msg bot">무엇을 도와드릴까요? "코드 생성" 요청을 하면, 생성된 코드에 대해 승인/거절을 선택할 수 있어요.</div>
     </div>
-
     <form id="composer">
       <input id="prompt" type="text" placeholder="예) express 서버 초기 코드 만들어줘" />
       <button type="submit">Send</button>
@@ -424,6 +478,25 @@ function getHtml(webview, ctx, nonce) {
 function getNonce() {
     const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
     return Array.from({ length: 32 }, () => chars[Math.floor(Math.random() * chars.length)]).join("");
+}
+/** 마지막 코드블록 추출 (```lang\ncode```) — Extension Host 런타임용 */
+function extractLastCodeBlockTS(text) {
+    const regex = /```([\s\S]*?)```/g;
+    let match;
+    let last = null;
+    while ((match = regex.exec(text)) !== null)
+        last = match[1];
+    if (!last)
+        return null;
+    const nl = last.indexOf("\n");
+    if (nl > -1) {
+        const maybeLang = last.slice(0, nl).trim();
+        const body = last.slice(nl + 1);
+        if (/^[a-zA-Z0-9+#._-]{0,20}$/.test(maybeLang)) {
+            return { language: maybeLang || "plaintext", code: body };
+        }
+    }
+    return { language: "plaintext", code: last };
 }
 function deactivate() { }
 //# sourceMappingURL=extension.js.map

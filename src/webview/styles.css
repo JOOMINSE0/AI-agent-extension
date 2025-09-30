@@ -117,3 +117,16 @@ pre.code-preview {
   border: 1px solid #777;
   color: #ccc;
 }
+.vector-line {
+  display: flex;
+  gap: 12px;
+  margin: 6px 0 8px;
+  opacity: 0.9;
+  font-size: 12px;
+}
+.reasons {
+  font-size: 12px;
+  color: #bbb;
+  margin-bottom: 8px;
+  line-height: 1.35;
+}
