@@ -130,3 +130,40 @@ pre.code-preview {
   margin-bottom: 8px;
   line-height: 1.35;
 }
+
+.analysis-modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.6);
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  z-index: 9999;
+  padding: 20px;
+  box-sizing: border-box;
+}
+.analysis-modal {
+  position: relative; /* 추가 */
+  width: 860px;
+  max-width: 100%;
+  max-height: 90vh;
+  overflow:auto;
+  background: var(--vscode-editor-background, #1e1e1e);
+  color: var(--vscode-editor-foreground, #ddd);
+  border-radius: 10px;
+  padding: 20px;
+  box-shadow: 0 10px 40px rgba(0,0,0,0.6);
+  font-family: var(--vscode-font-family, "Segoe UI", Roboto, "Helvetica Neue", Arial);
+  border: 1px solid rgba(255,255,255,0.04);
+}
+.analysis-modal .close-btn {
+  position: absolute;
+  top: 12px;    /* 모달 상단 여백 */
+  right: 12px;  /* 모달 오른쪽 여백 */
+  background: transparent;
+  border: 0;
+  color: inherit;
+  cursor: pointer;
+  font-size: 20px;
+  line-height: 1;
+}
