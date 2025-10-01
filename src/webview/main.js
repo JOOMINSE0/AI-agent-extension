@@ -201,7 +201,7 @@ score = round(raw * 100)
     </div>
 
     <div class="footer">
-      <button class="close-btn primary">X</button>
+      <button class="close-btn primary"></button>
     </div>
   `;
 
