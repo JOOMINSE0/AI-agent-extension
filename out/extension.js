@@ -35,12 +35,13 @@ var __importStar = (this && this.__importStar) || (function () {
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.activate = activate;
 exports.deactivate = deactivate;
+// src/extension.ts
 const vscode = __importStar(require("vscode"));
 /**
- * AI Approval Agent
+ * AI Approval Agent (FRD 2단 가중치 반영판)
  * - Ollama 스트리밍
- * - 휴리스틱 + LLM 자가평가(JSON) 융합
- * - 승인: 코드 저장 또는 터미널 명령 실행
+ * - 휴리스틱 + LLM 자가평가(JSON: function_change/resource_usage/security_dependency) 융합
+ * - 승인 게이트: 위험 명령 차단, RED 확인문자 입력
  */
 function activate(context) {
     console.log("AI Approval Agent is now active!");
@@ -72,7 +73,13 @@ function getCfg() {
     const cfg = vscode.workspace.getConfiguration();
     return {
         endpoint: (cfg.get("aiApproval.ollama.endpoint") || "http://210.110.103.64:11434").replace(/\/$/, ""),
-        model: cfg.get("aiApproval.ollama.model") || "llama3.1:8b"
+        model: cfg.get("aiApproval.ollama.model") || "llama3.1:8b",
+        // 최상위 FRD 가중치 (합 1 권장)
+        wF: cfg.get("aiApproval.weights.functionality") ?? 0.40,
+        wR: cfg.get("aiApproval.weights.resource") ?? 0.30,
+        wD: cfg.get("aiApproval.weights.dependency") ?? 0.30,
+        // 휴리스틱 vs LLM 융합 비율
+        alpha: cfg.get("aiApproval.fusion.alpha") ?? 0.60
     };
 }
 /* ---------- Webview messaging ---------- */
@@ -82,9 +89,13 @@ function wireMessages(webview) {
             switch (msg.type) {
                 case "approve": {
                     const { code = "", language = "plaintext", filename = null, score = null, severity = null } = msg || {};
+                    // RED 게이트: 확인문자 요구
                     if (severity === "red") {
-                        const ok = await vscode.window.showWarningMessage(`이 변경은 높은 위험 점수(${score})입니다. 정말 저장/실행하시겠습니까?`, { modal: true }, "확인", "취소");
-                        if (ok !== "확인")
+                        const input = await vscode.window.showInputBox({
+                            prompt: `고위험(${score})입니다. 계속하려면 'CONFIRM'을 입력하세요.`,
+                            validateInput: v => (v === "CONFIRM" ? null : "CONFIRM 을 입력해야 합니다.")
+                        });
+                        if (input !== "CONFIRM")
                             return;
                     }
                     await handleApproval(code, language, filename);
@@ -95,38 +106,50 @@ function wireMessages(webview) {
                     break;
                 }
                 case "details": {
-                    vscode.window.showInformationMessage("자세히 보기: 사유는 카드에 표시됩니다. (확장 쪽 추가 액션 가능)");
+                    vscode.window.showInformationMessage("자세히 보기: 사유는 카드에 표시됩니다.");
                     break;
                 }
                 case "ask": {
-                    const { endpoint, model } = getCfg();
+                    const { endpoint, model, wF, wR, wD, alpha } = getCfg();
                     try {
                         // 1) 스트리밍 + 전체 텍스트 수집
                         const fullText = await chatWithOllamaAndReturn(endpoint, model, msg.text, (delta) => {
                             webview.postMessage({ type: "delta", text: delta });
                         });
-                        // 2) 사용자 프롬프트를 포함해서 분석(위험 의도 반영)
+                        // 2) 사용자 프롬프트 포함 조합 (위험 의도 반영)
                         const combined = `USER:\n${msg.text}\n\nASSISTANT:\n${fullText}`;
-                        // 3) 마지막 코드블록 추출 + 파일명 힌트
-                        const snippet = extractLastCodeBlockTS(fullText); // 코드블록은 답변에서 추출
+                        // 3) 코드블록 추출 + 파일명 힌트
+                        const snippet = extractLastCodeBlockTS(fullText);
                         const suggested = detectSuggestedFileName(fullText, snippet?.language ?? "plaintext");
-                        // 4) 휴리스틱
+                        // 4) 휴리스틱 → 신호(F/R/D) → 차원 점수
                         const heur = analyzeGeneratedText(combined, snippet?.code ?? "", suggested);
-                        // 5) LLM 자가평가(JSON)
+                        // 5) LLM 자가평가(JSON) — 키 이름 스펙 일치
                         const llm = await llmSelfJudgeJSON(endpoint, model, combined, snippet?.code ?? "");
-                        // 6) 융합
-                        const fusedVector = fuseVector(heur.vector, llm);
-                        const scored = scoreFromVector(fusedVector);
-                        // 7) 웹뷰로 전달 (자가평가 사유 포함)
+                        // 6) 융합 (휴리스틱 60% + LLM 40% 기본)
+                        const fusedVector = fuseVector(heur.vector, llm ? [llm.function_change, llm.resource_usage, llm.security_dependency] : null, alpha);
+                        // 7) 최종 점수 (상위 가중치 적용)
+                        const scored = scoreFromVector(fusedVector, { wF, wR, wD });
+                        // 참고치(설명력)
+                        const llmVector = llm ? [llm.function_change, llm.resource_usage, llm.security_dependency] : heur.vector;
+                        const llmOnly = scoreFromVector(llmVector, { wF, wR, wD });
+                        const heurOnly = scoreFromVector(heur.vector, { wF, wR, wD });
+                        // 8) 웹뷰로 전달 (신호 테이블 + 사유 포함)
                         webview.postMessage({
                             type: "analysis",
                             vector: fusedVector,
                             score: scored.score,
                             severity: scored.severity,
+                            weights: scored.weights,
                             suggestedFilename: suggested || null,
                             language: snippet?.language ?? "plaintext",
                             code: snippet?.code ?? "",
-                            reasons: llm?.reasons || {}
+                            reasons: llm?.reasons || {},
+                            signalTable: heur.signalTable, // 휴리스틱 추정 신호값
+                            breakdown: {
+                                fused: { vector: fusedVector, ...scored },
+                                llmOnly: { vector: llmVector, ...llmOnly },
+                                heurOnly: { vector: heur.vector, ...heurOnly }
+                            }
                         });
                         webview.postMessage({ type: "done" });
                     }
@@ -198,7 +221,6 @@ async function chatWithOllamaAndReturn(endpoint, model, userText, onDelta) {
     }
     return full;
 }
-/* ---------- LLM Self-Judge(JSON) ---------- */
 async function llmSelfJudgeJSON(endpoint, model, fullText, code) {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const fetchFn = globalThis.fetch;
@@ -211,22 +233,22 @@ async function llmSelfJudgeJSON(endpoint, model, fullText, code) {
             messages: [
                 {
                     role: "system",
-                    content: `You are a code change risk auditor. Return STRICT JSON only. No prose. 
+                    content: `You are a code change risk auditor. Return STRICT JSON only. No prose.
 Keys and ranges:
 {
  "function_change": 0..1,
- "stability_risk": 0..1,
+ "resource_usage": 0..1,
  "security_dependency": 0..1,
  "reasons": {
    "function_change": "short reason",
-   "stability_risk": "short reason",
+   "resource_usage": "short reason",
    "security_dependency": "short reason"
  }
 }
 Interpretation:
-- function_change: schema/core-purpose changes, main/server/index/core rewrite ↑
-- stability_risk: infinite loops, heavy resources, fragile logic ↑
-- security_dependency: new/vulnerable deps, eval/exec, credentials, SQL dangerous changes ↑`
+- function_change: public API ratio↑, core/domain change, large diff, schema change
+- resource_usage: heavy loops/parallelism, memory growth, external calls/cost
+- security_dependency: new/vulnerable deps, dangerous APIs (eval/exec), credentials, SQL risks`
                 },
                 {
                     role: "user",
@@ -256,83 +278,143 @@ Return JSON ONLY.`
         return null;
     }
 }
-/* ---------- Fuse Heuristic + LLM ---------- */
-function fuseVector(heur, // [F,R,S]
-llm) {
-    if (!llm)
-        return heur;
-    const v2 = [llm.function_change, llm.stability_risk, llm.security_dependency];
-    const alpha = 0.6; // 휴리스틱 60% + LLM 40%
-    return [
-        alpha * heur[0] + (1 - alpha) * v2[0],
-        alpha * heur[1] + (1 - alpha) * v2[1],
-        alpha * heur[2] + (1 - alpha) * v2[2]
-    ];
+/* ---------- Weights (신호/차원) ---------- */
+// 차원 내부 신호 가중치 (합 1)
+const WF = { api: 0.40, core: 0.25, diff: 0.20, schema: 0.15 };
+const WR = { bigO: 0.40, mem: 0.30, ext: 0.20 };
+const WD = { cve: 0.35, rep: 0.30, lic: 0.20, perm: 0.15 };
+const clamp01 = (x) => Math.max(0, Math.min(1, x));
+function mapBigOTo01(bigO) {
+    const lut = {
+        "O(1)": 0.05, "O(log n)": 0.15, "O(n)": 0.20, "O(n log n)": 0.35, "O(n^2)": 0.70, "O(n^3)": 0.90, "unknown": 0.50
+    };
+    return lut[bigO] ?? 0.50;
 }
-/* ---------- Heuristic analysis (강화판) ---------- */
+/* ---- 차원 점수 계산 ---- */
+function computeFSignals(s) {
+    const v = s.api * WF.api + (s.core ? 1 : 0) * WF.core + s.diff * WF.diff + (s.schema ? 1 : 0) * WF.schema;
+    return clamp01(v);
+}
+function computeRSignals(s) {
+    const v = s.bigO * WR.bigO + s.mem * WR.mem + s.ext * WR.ext;
+    return clamp01(v);
+}
+function computeDSignals(s) {
+    const v = s.cve * WD.cve + (1 - s.rep) * WD.rep + (s.lic ? 1 : 0) * WD.lic + s.perm * WD.perm;
+    return clamp01(v);
+}
+/* ---------- Heuristic analysis (신호 추정 + 차원 점수) ---------- */
 function analyzeGeneratedText(fullText, code, filename) {
     const whole = (fullText + "\n" + code);
-    // F: 기능/목적 변경
-    let F = 0;
-    const funcKeywords = /\b(replace|rewrite|refactor|rework|rewrite core|change core|alter core|replace core)\b/i;
-    if (funcKeywords.test(whole))
-        F += 0.6;
-    if (filename && /(?:^|\/)(?:main|server|app|index|core)\.[a-z0-9]+$/i.test(filename))
-        F = Math.min(1, F + 0.3);
-    if (code.length > 2000)
-        F = Math.min(1, F + 0.2);
-    // R: 안정성/자원
-    let R = 0;
-    const heavyPatterns = /\b(while\s*\(|for\s*\(|sleep\(|thread|fork|subprocess|multiprocessing|spawn|map_reduce|batch|malloc|calloc|new\s+[A-Z])/i;
-    if (heavyPatterns.test(whole))
-        R += 0.4;
-    if (code.split("\n").length > 200)
-        R = Math.min(1, R + 0.2);
-    // S: 보안/의존성 + SQL 보강
-    let S = 0;
-    const depMatches = Array.from(whole.matchAll(/(?:import\s+([a-z0-9_.\-]+)|require\(['"]([a-z0-9_.\-]+)['"]\))/ig));
-    if (depMatches.length > 0)
-        S += Math.min(0.6, 0.15 * depMatches.length);
-    if (/\beval\(|exec\(|system\(|popen\(|open\([^,]*\/etc\/passwd|sshpass\b/i.test(whole))
-        S = Math.min(1, S + 0.6);
-    // SQL/비밀번호 관련
-    const hasSQLDDL = /\b(ALTER\s+TABLE|CREATE\s+TABLE|DROP\s+TABLE|ALTER\s+COLUMN|ADD\s+COLUMN)\b/i.test(whole);
-    const touchesUserTable = /\b(mysql\.user|users?\b|accounts?\b|credentials?\b)\b/i.test(whole);
-    const addsPasswordCol = /\bADD\s+COLUMN\s+`?password`?\b/i.test(whole);
-    const updatesPassword = /\bUPDATE\s+[^\s`]+(?:\s+SET|\s+SET\s+)+[^;]*\b`?password`?\b/i.test(whole);
-    const mentionsPlain = /\b(plain\s*text|평문)\b/i.test(whole) || /\bCHAR\s*\(|\bVARCHAR\s*\(|\bTEXT\b/i.test(whole);
-    const usesHashing = /\b(bcrypt|argon2|scrypt|pbkdf2|sha\d{1,3})\b/i.test(whole);
-    const touchesSystemUsr = /\bmysql\.user\b/i.test(whole);
-    if (hasSQLDDL && touchesUserTable) {
-        F = Math.min(1, F + 0.5);
-        S = Math.min(1, S + 0.3);
-    }
-    if (addsPasswordCol || updatesPassword)
-        S = Math.min(1, S + 0.6);
-    // "평문" 언급 + password 관련 작업 → 강하게 가중. (해시 포함 시 과도 상승 방지)
-    if ((addsPasswordCol || updatesPassword || /password/i.test(whole)) && mentionsPlain && !usesHashing) {
-        S = Math.min(1, S + 0.7);
-        if (S < 0.6)
-            S = 0.6; // 최소 바닥선
-    }
-    if (touchesSystemUsr)
-        S = Math.min(1, S + 0.8);
-    F = Math.min(1, Math.max(0, F));
-    R = Math.min(1, Math.max(0, R));
-    S = Math.min(1, Math.max(0, S));
-    return { vector: [F, R, S], code, filename };
+    // ===== F 신호 추정 =====
+    const apiChangedRatio = estimateChangedApiRatio(whole); // 0..1
+    const coreModule = isCoreModule(filename) || /(?:core|domain|service)\//i.test(whole);
+    const diffRatio = estimateDiffLineRatio(whole); // 0..1 (간이)
+    const schemaChanged = /\b(ALTER\s+TABLE|CREATE\s+TABLE|DROP\s+TABLE|ALTER\s+COLUMN|ADD\s+COLUMN|MIGRATION)\b/i.test(whole);
+    const F = computeFSignals({ api: apiChangedRatio, core: coreModule, diff: diffRatio, schema: schemaChanged });
+    // ===== R 신호 추정 =====
+    const bigO = inferBigOFromText(whole); // 0..1
+    const memInc = estimateMemIncrease(whole); // 0..1
+    const extCalls = estimateExternalCallImpact(whole); // 0..1
+    const R = computeRSignals({ bigO, mem: memInc, ext: extCalls });
+    // ===== D 신호 추정 =====
+    const cveSeverity = /\bCVE-\d{4}-\d+\b/i.test(whole) ? 0.8 : 0.0; // 텍스트에 CVE 언급시 가중
+    const libRep = estimateLibraryReputation(whole); // 0..1 (높을수록 안전)
+    const licenseMismatch = /LICENSE|SPDX|GPL\b.*\bMIT\b|license\s+conflict/i.test(whole) ? true : false;
+    const sensitivePerm = estimateSensitivePermission(whole); // 0..1
+    const D = computeDSignals({ cve: cveSeverity, rep: libRep, lic: licenseMismatch, perm: sensitivePerm });
+    const vector = [F, R, D];
+    // 웹뷰용 신호 테이블(값만 전달)
+    const signalTable = {
+        F: { changedApiRatio: apiChangedRatio, coreModuleModified: coreModule ? 1 : 0, diffLineRatio: diffRatio, schemaChanged: schemaChanged ? 1 : 0 },
+        R: { timeComplexity: bigO, memIncreaseRatio: memInc, externalCallNorm: extCalls },
+        D: { cveSeverity, libReputation: libRep, licenseMismatch: licenseMismatch ? 1 : 0, sensitivePerm: sensitivePerm }
+    };
+    return { vector, code, filename, signalTable };
 }
-function scoreFromVector(v) {
-    // 보안 비중을 더 주고 싶다면 [0.35, 0.30, 0.35]로 조정 가능
-    const w = [0.30, 0.10, 0.60];
-    const raw = v[0] * w[0] + v[1] * w[1] + v[2] * w[2];
+/* ---------- 간이 신호 추정 유틸 (AST/프로파일링 없이 텍스트/정규식으로 근사) ---------- */
+function estimateChangedApiRatio(text) {
+    // export/public 함수 시그니처 변화를 간이 추정 (API 키워드 수의 변화 힌트)
+    const addedApis = (text.match(/\bexport\s+(?:function|class|interface)\b/gi) || []).length
+        + (text.match(/\bpublic\s+(?:class|interface|function|method)\b/gi) || []).length;
+    // 상수 10 기준으로 비율 근사 (실제 구현은 AST 비교 권장)
+    return clamp01(addedApis / 10);
+}
+function estimateDiffLineRatio(text) {
+    // ```diff 혹은 +/− 라인 패턴 근사
+    const plus = (text.match(/^\+\s?.+/gm) || []).length;
+    const minus = (text.match(/^-\s?.+/gm) || []).length;
+    const changed = plus + minus;
+    return clamp01(changed / 500); // 500라인 기준 스케일
+}
+function inferBigOFromText(text) {
+    if (/\bfor\s*\(.*\)\s*{[^}]*for\s*\(/is.test(text) || /\bO\(n\^?2\)/i.test(text))
+        return mapBigOTo01("O(n^2)");
+    if (/\bwhile\s*\(.*\)\s*{[^}]*while\s*\(/is.test(text))
+        return mapBigOTo01("O(n^2)");
+    if (/\bfor\s*\(/i.test(text) && /\blog\b/i.test(text))
+        return mapBigOTo01("O(n log n)");
+    if (/\bfor\s*\(/i.test(text) || /\bwhile\s*\(/i.test(text))
+        return mapBigOTo01("O(n)");
+    return mapBigOTo01("unknown");
+}
+function estimateMemIncrease(text) {
+    const allocs = (text.match(/\bnew\s+[A-Z][A-Za-z0-9_]*\b/g) || []).length
+        + (text.match(/\bmalloc|calloc|Array\(|Buffer\.alloc|new\s+Array\b/gi) || []).length;
+    return clamp01(allocs / 50);
+}
+function estimateExternalCallImpact(text) {
+    const calls = (text.match(/\b(fetch|axios|request|http\.|https\.|db\.|query|sequelize|prisma|jdbc|mongo|redis)\b/gi) || []).length;
+    return clamp01(calls / 40);
+}
+function estimateLibraryReputation(text) {
+    // 유명 프레임워크 키워드가 있으면 rep↑, 생소한 패키지 다량이면 rep↓ (아주 거친 근사)
+    const wellKnown = /react|express|django|spring|numpy|pandas|lodash|fastapi|flask|typeorm|sequelize/i.test(text);
+    const deps = Array.from(text.matchAll(/(?:import\s+([a-z0-9_.\-@/]+)|require\(['"]([a-z0-9_.\-@/]+)['"]\))/ig)).length;
+    if (wellKnown && deps < 10)
+        return 0.85;
+    if (!wellKnown && deps >= 10)
+        return 0.40;
+    return 0.65;
+}
+function estimateSensitivePermission(text) {
+    let v = 0;
+    if (/\bfs\.(read|write|unlink|chmod|chown|readdir)\b/i.test(text))
+        v += 0.3;
+    if (/\bprocess\.env\b|\bcredential|\bpassword\b/i.test(text))
+        v += 0.3;
+    if (/\bchild_process|exec\(|spawn\(|popen\(|system\(/i.test(text))
+        v += 0.4;
+    return clamp01(v);
+}
+function isCoreModule(path) {
+    if (!path)
+        return false;
+    return /(\/|^)(core|domain|service|app|server|main|index)\.[a-z0-9]+$/i.test(path)
+        || /(\/|^)(core|domain|service)\//i.test(path);
+}
+/* ---------- Fuse Heuristic + LLM ---------- */
+function fuseVector(heur, // [F,R,D]
+llm, alpha) {
+    if (!llm)
+        return heur;
+    return [
+        alpha * heur[0] + (1 - alpha) * llm[0],
+        alpha * heur[1] + (1 - alpha) * llm[1],
+        alpha * heur[2] + (1 - alpha) * llm[2]
+    ];
+}
+/* ---------- Final scoring ---------- */
+function scoreFromVector(v, top) {
+    const cfg = top ?? { wF: 0.40, wR: 0.30, wD: 0.30 };
+    const raw = v[0] * cfg.wF + v[1] * cfg.wR + v[2] * cfg.wD; // 0~1
     const score = Math.round(raw * 100);
     let severity = "green";
     if (score >= 70)
         severity = "red";
     else if (score >= 40)
         severity = "yellow";
-    return { score, severity };
+    return { score, severity, weights: cfg };
 }
 /* ---------- Filename hint ---------- */
 function detectSuggestedFileName(fullText, _fallbackLang) {
@@ -361,11 +443,24 @@ async function handleApproval(code, language, suggested) {
         vscode.window.showErrorMessage("워크스페이스가 열려 있지 않습니다.");
         return;
     }
-    // 터미널 명령 감지
-    const shellCmdPattern = /^(npm|yarn|pip|pip3|pnpm|apt|apt-get|brew|git|chmod|chown|sudo|rm|mv|cp|mkdir|rmdir|systemctl|service)\b/i;
+    // 터미널 명령 감지 + 위험 명령 차단
+    const shellCmdPattern = /^(npm|yarn|pip|pip3|pnpm|apt|apt-get|brew|git|chmod|chown|sudo|rm|mv|cp|mkdir|rmdir|systemctl|service|curl|bash)\b/i;
     const firstLine = (code || "").trim().split(/\r?\n/)[0] || "";
     const looksLikeShell = language === "bash" || language === "sh" || shellCmdPattern.test(firstLine);
+    const denylist = [
+        /\brm\s+-rf?\s+\/?[^]*?/i,
+        /\bsudo\b/i,
+        /\bchown\b/i,
+        /\bmkfs\w*\b/i,
+        /\bdd\s+if=\/dev\/zero\b/i,
+        /\bshutdown\b|\breboot\b/i,
+        /\bcurl\b.*\|\s*sh\b/i
+    ];
     if (looksLikeShell) {
+        if (denylist.some(rx => rx.test(code))) {
+            vscode.window.showErrorMessage("위험 명령이 감지되어 실행을 차단했습니다.");
+            return;
+        }
         const confirm = await vscode.window.showWarningMessage("터미널 명령으로 감지되었습니다. 통합 터미널에서 실행할까요?", { modal: true }, "실행", "취소");
         if (confirm !== "실행")
             return;
@@ -398,7 +493,7 @@ function guessExtension(language) {
         javascript: "js", typescript: "ts", python: "py",
         html: "html", css: "css", java: "java",
         c: "c", cpp: "cpp", tsx: "tsx", jsx: "jsx",
-        json: "json", plaintext: "txt", bash: "sh", sh: "sh"
+        json: "json", plaintext: "txt", bash: "sh", sh: "sh", kotlin: "kt"
     };
     const key = (language || "").toLowerCase().trim();
     return map[key] || (key.match(/^[a-z0-9]+$/) ? key : "txt");
@@ -458,13 +553,90 @@ function getHtml(webview, ctx, nonce) {
   <meta http-equiv="Content-Security-Policy" content="${csp}">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <link rel="stylesheet" href="${css}">
-  <title>AI Approval</title>
+  <style>
+    body {
+      margin: 0;
+      padding: 0;
+      background: var(--vscode-editor-background, #1e1e1e);
+      color: var(--vscode-editor-foreground, #ddd);
+      font-family: var(--vscode-font-family, "Segoe UI", Roboto, "Helvetica Neue", Arial);
+    }
+
+    .chat {
+      display: flex;
+      flex-direction: column;
+      height: 100vh;
+      box-sizing: border-box;
+      padding: 10px;
+    }
+
+    .chat-header {
+      font-weight: 700;
+      font-size: 16px;
+      margin-bottom: 10px;
+    }
+
+    .chat-body {
+      flex: 1;
+      overflow-y: auto;
+      padding: 10px;
+      background: var(--vscode-sideBar-background, #252526);
+      border-radius: 6px;
+      box-shadow: inset 0 0 3px rgba(0,0,0,0.4);
+      margin-bottom: 10px;
+    }
+
+    #composer {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      width: 100%;
+      box-sizing: border-box;
+    }
+
+    #composer #prompt {
+      flex: 1 1 auto;
+      width: 100%;
+      min-width: 0;
+      padding: 8px 12px;
+      border: 1px solid var(--vscode-input-border, #555);
+      border-radius: 4px;
+      background: var(--vscode-input-background, #1e1e1e);
+      color: var(--vscode-input-foreground, #ddd);
+      font-size: 13px;
+      box-sizing: border-box;
+    }
+
+    #composer #prompt::placeholder {
+      color: #888;
+    }
+
+    #composer button {
+      flex: 0 0 auto;
+      padding: 8px 14px;
+      border: none;
+      border-radius: 4px;
+      cursor: pointer;
+      background: var(--vscode-button-background, #007acc);
+      color: var(--vscode-button-foreground, #fff);
+      font-weight: 600;
+      font-size: 13px;
+      transition: background 0.15s ease-in-out;
+    }
+
+    #composer button:hover {
+      background: var(--vscode-button-hoverBackground, #0b7dd8);
+    }
+  </style>
+  <title>AI Approval Agent</title>
 </head>
 <body>
   <section class="chat">
     <div class="chat-header">AI Approval Agent</div>
     <div class="chat-body" id="chat">
-      <div class="msg bot">무엇을 도와드릴까요? "코드 생성" 요청을 하면, 생성된 코드에 대해 승인/거절을 선택할 수 있어요.</div>
+      <div class="msg bot">
+        무엇을 도와드릴까요? “코드 생성” 요청을 하면, 생성된 코드에 대해 승인/거절을 선택할 수 있어요.
+      </div>
     </div>
     <form id="composer">
       <input id="prompt" type="text" placeholder="예) express 서버 초기 코드 만들어줘" />
@@ -499,4 +671,22 @@ function extractLastCodeBlockTS(text) {
     return { language: "plaintext", code: last };
 }
 function deactivate() { }
+/* ----------------------------------------------------------------------
+ * 참고: package.json의 contributes.configuration에 아래 키를 등록하면
+ * 가중치/융합 비율을 UI에서 조절할 수 있어요.
+ *
+"contributes": {
+  "configuration": {
+    "title": "AI Approval Agent",
+    "properties": {
+      "aiApproval.ollama.endpoint": { "type":"string", "default":"http://210.110.103.64:11434" },
+      "aiApproval.ollama.model":    { "type":"string", "default":"llama3.1:8b" },
+      "aiApproval.weights.functionality": { "type":"number", "default":0.40, "minimum":0, "maximum":1 },
+      "aiApproval.weights.resource":      { "type":"number", "default":0.30, "minimum":0, "maximum":1 },
+      "aiApproval.weights.dependency":    { "type":"number", "default":0.30, "minimum":0, "maximum":1 },
+      "aiApproval.fusion.alpha":          { "type":"number", "default":0.60, "minimum":0, "maximum":1 }
+    }
+  }
+}
+ * -------------------------------------------------------------------- */
 //# sourceMappingURL=extension.js.map

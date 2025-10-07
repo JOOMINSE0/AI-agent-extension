@@ -27,7 +27,7 @@ if (!chat || !form || !input) {
   box-sizing: border-box;
 }
 .analysis-modal {
-  width: 860px;
+  width: 920px;
   max-width: 100%;
   max-height: 90vh;
   overflow:auto;
@@ -38,6 +38,7 @@ if (!chat || !form || !input) {
   box-shadow: 0 10px 40px rgba(0,0,0,0.6);
   font-family: var(--vscode-font-family, "Segoe UI", Roboto, "Helvetica Neue", Arial);
   border: 1px solid rgba(255,255,255,0.04);
+  position: relative;
 }
 .analysis-modal h2 { margin:0 0 8px 0; font-size:18px; }
 .analysis-modal .kpi { display:flex; gap:12px; align-items:center; margin-bottom:12px; }
@@ -46,13 +47,16 @@ if (!chat || !form || !input) {
 .analysis-modal .kpi .yellow { background:#b8860b; color:white; }
 .analysis-modal .kpi .red { background:#b31c1c; color:white; }
 .analysis-modal .vector-row { display:flex; gap:16px; margin-bottom:8px; }
-.analysis-modal .vector-row .item { min-width:80px; }
-.analysis-modal .section { margin-top:12px; padding-top:8px; border-top:1px solid rgba(255,255,255,0.03); }
+.analysis-modal .vector-row .item { min-width:120px; }
+.analysis-modal .section { margin-top:12px; padding-top:8px; border-top:1px solid rgba(255,255,255,0.06); }
 .analysis-modal .reasons { margin-top:8px; }
 .analysis-modal pre { background: rgba(0,0,0,0.2); padding:10px; border-radius:6px; overflow:auto; white-space:pre-wrap; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace; font-size:12px; }
 .analysis-modal .close-btn { position:absolute; right:18px; top:14px; background:transparent; border:0; color:inherit; cursor:pointer; font-size:18px; }
 .analysis-modal .footer { display:flex; justify-content:flex-end; gap:8px; margin-top:14px; }
 .analysis-modal .explain { font-size:13px; color:var(--vscode-descriptionForeground,#cfcfcf); }
+.signal-grid { display:grid; grid-template-columns: 210px 1fr 1fr; gap:6px 12px; margin-top:6px; font-size:12px; }
+.signal-grid .th { opacity:0.8; }
+.badge-mini { display:inline-block; padding:2px 6px; border-radius:10px; background:#333; color:#ddd; font-size:11px; margin-left:6px; }
 `;
   const style = document.createElement("style");
   style.textContent = css;
@@ -112,8 +116,7 @@ function extractLastCodeBlock(text) {
 function detectSuggestedFileName(fullText, fallbackLang) {
   const re =
     /(?:file\s*[:=]\s*|create\s*|\bmake\s*|\bsave\s*as\s*|\b파일(?:명|을)?\s*(?:은|을)?\s*)([A-Za-z0-9_\-./]+?\.[A-Za-z]{1,8})/gi;
-  let m,
-    last = null;
+  let m, last = null;
   while ((m = re.exec(fullText)) !== null) last = m[1];
   if (!last) return null;
 
@@ -126,72 +129,139 @@ function detectSuggestedFileName(fullText, fallbackLang) {
   if (fallbackLang && fallbackLang.toLowerCase() === "html" && last.toLowerCase().endsWith(".py")) {
     return null;
   }
-
   return last.replace(/^\/+/, "");
 }
 
 /**
+ * 신호 테이블 렌더링 (analysis.signalTable + 최상위 가중치)
+ */
+function renderSignalTable(signalTable, topWeights) {
+  if (!signalTable) return '<div class="explain">신호값이 제공되지 않았습니다.</div>';
+
+  const pct = (x) => `${Math.round((x || 0) * 100)}%`;
+  const rows = [];
+
+  // F
+  if (signalTable.F) {
+    rows.push(
+      `<div class="th"><strong>F · 기능 변경</strong>${topWeights ? `<span class="badge-mini">wF ${topWeights.wF}</span>` : ""}</div><div class="th">값(0~1)</div><div class="th">비고</div>`,
+      `<div>Changed API Ratio</div><div>${(signalTable.F.changedApiRatio ?? 0).toFixed(2)}</div><div>${pct(signalTable.F.changedApiRatio)}</div>`,
+      `<div>Core Module Modified</div><div>${(signalTable.F.coreModuleModified ?? 0)}</div><div>core/domain/service</div>`,
+      `<div>Code Change Size</div><div>${(signalTable.F.diffLineRatio ?? 0).toFixed(2)}</div><div>${pct(signalTable.F.diffLineRatio)}</div>`,
+      `<div>Schema Change</div><div>${(signalTable.F.schemaChanged ?? 0)}</div><div>DDL/migration</div>`
+    );
+  }
+
+  // R
+  if (signalTable.R) {
+    rows.push(
+      `<div class="th" style="margin-top:6px;"><strong>R · 자원/안정성</strong>${topWeights ? `<span class="badge-mini">wR ${topWeights.wR}</span>` : ""}</div><div class="th">값(0~1)</div><div class="th">비고</div>`,
+      `<div>Algorithm Complexity</div><div>${(signalTable.R.timeComplexity ?? 0).toFixed(2)}</div><div>Big-O 매핑</div>`,
+      `<div>Memory Allocation Increase</div><div>${(signalTable.R.memIncreaseRatio ?? 0).toFixed(2)}</div><div>${pct(signalTable.R.memIncreaseRatio)}</div>`,
+      `<div>External Call Addition</div><div>${(signalTable.R.externalCallNorm ?? 0).toFixed(2)}</div><div>지연/비용 정규화</div>`
+    );
+  }
+
+  // D
+  if (signalTable.D) {
+    rows.push(
+      `<div class="th" style="margin-top:6px;"><strong>D · 보안/의존성</strong>${topWeights ? `<span class="badge-mini">wD ${topWeights.wD}</span>` : ""}</div><div class="th">값(0~1)</div><div class="th">비고</div>`,
+      `<div>CVE Severity</div><div>${(signalTable.D.cveSeverity ?? 0).toFixed(2)}</div><div>0~1</div>`,
+      `<div>Library Reputation</div><div>${(signalTable.D.libReputation ?? 0).toFixed(2)}</div><div>높을수록 안전</div>`,
+      `<div>License Mismatch</div><div>${(signalTable.D.licenseMismatch ?? 0)}</div><div>0/1</div>`,
+      `<div>Sensitive Permission</div><div>${(signalTable.D.sensitivePerm ?? 0).toFixed(2)}</div><div>0~1</div>`
+    );
+  }
+
+  return `<div class="signal-grid">${rows.join("")}</div>`;
+}
+
+/**
  * 상세 모달 표시
- * - analysis: { vector: [F,R,S], score, severity, reasons }
+ * - analysis: { score, severity, vector, reasons, breakdown?, signalTable?, weights? }
  * - snippet: { language, code, filename }
  */
 function showAnalysisModal(analysis = {}, snippet = {}) {
-  // 중복 모달 방지
   if (document.querySelector(".analysis-modal-overlay")) return;
 
-  const vector = Array.isArray(analysis.vector) ? analysis.vector : [0, 0, 0];
-  const F = Math.round((vector[0] || 0) * 100);
-  const R = Math.round((vector[1] || 0) * 100);
-  const S = Math.round((vector[2] || 0) * 100);
+  // 헤드라인(최종/FUSED)
+  const headScore = typeof analysis.score === "number" ? analysis.score : 0;
+  const headSeverity = analysis.severity || "green";
 
-  // 같은 가중치 사용 (확장: 이 값을 서버(확장)와 동기화하면 좋음)
-  const weights = { F: 0.4, R: 0.35, S: 0.25 };
-  const raw =
-    (vector[0] || 0) * weights.F + (vector[1] || 0) * weights.R + (vector[2] || 0) * weights.S;
-  const computedScore = Math.round(raw * 100);
-  const severity = analysis.severity || (computedScore >= 70 ? "red" : computedScore >= 40 ? "yellow" : "green");
+  // F/R/D 벡터(기본: FUSED)
+  const fusedVector = Array.isArray(analysis.vector) ? analysis.vector : [0, 0, 0];
+  const pct = (x) => Math.round((x || 0) * 100);
+  const F = pct(fusedVector[0]);
+  const R = pct(fusedVector[1]);
+  const D = pct(fusedVector[2]);
 
   const reasons = analysis.reasons || {};
+  const signalTable = analysis.signalTable || null;
+  const topWeights = analysis.weights || null;
+
+  // 분해 점수(있을 때만 렌더)
+  const bd = analysis.breakdown || {};
+  const mkRow = (label, entry) => {
+    if (!entry || !Array.isArray(entry.vector)) return "";
+    const v = entry.vector;
+    return `
+      <div style="display:flex;gap:12px;align-items:center;margin:4px 0;">
+        <div style="min-width:120px;"><strong>${label}</strong></div>
+        <div style="min-width:70px;">점수: ${typeof entry.score==='number' ? entry.score : "-"}</div>
+        <div style="min-width:80px;">등급: ${(entry.severity||"").toUpperCase()}</div>
+        <div>F ${pct(v[0])}% / R ${pct(v[1])}% / D ${pct(v[2])}%</div>
+      </div>`;
+  };
 
   const overlay = document.createElement("div");
   overlay.className = "analysis-modal-overlay";
-
   const modal = document.createElement("div");
   modal.className = "analysis-modal";
 
   modal.innerHTML = `
     <button class="close-btn" title="Close">&times;</button>
     <h2>승인 상세 분석 결과</h2>
+
     <div class="kpi">
-      <div class="big ${severity}">${computedScore}</div>
+      <div class="big ${headSeverity}">${headScore}</div>
       <div style="flex:1">
-        <div style="font-weight:700">${(severity==='red')? '승인 필수 (Human review required)' : (severity==='yellow')? '승인 필요' : '안전 (자동 승인 가능)'}</div>
-        <div class="explain">점수 산정식: score = round( F*${weights.F} + R*${weights.R} + S*${weights.S} ) * 100</div>
+        <div style="font-weight:700">
+          ${headSeverity==='red' ? '승인 필수 (Human review required)' : headSeverity==='yellow' ? '승인 필요' : '안전 (자동 승인 가능)'}
+        </div>
+        <div class="explain">
+          헤드라인은 최종 융합 점수(FUSED)를 그대로 표시합니다.
+          ${topWeights ? `<span class="badge-mini">Weights F:${topWeights.wF} R:${topWeights.wR} D:${topWeights.wD}</span>` : ""}
+        </div>
       </div>
     </div>
 
     <div class="vector-row">
       <div class="item"><strong>F (기능 변경)</strong><div>${F}%</div></div>
-      <div class="item"><strong>R (안정성)</strong><div>${R}%</div></div>
-      <div class="item"><strong>S (보안/의존성)</strong><div>${S}%</div></div>
+      <div class="item"><strong>R (자원/안정성)</strong><div>${R}%</div></div>
+      <div class="item"><strong>D (보안/의존성)</strong><div>${D}%</div></div>
     </div>
 
     <div class="section">
-      <div style="font-weight:700">가중치 (현재 설정)</div>
-      <div class="explain">F: ${weights.F} &nbsp; R: ${weights.R} &nbsp; S: ${weights.S} &nbsp; (합: ${weights.F+weights.R+weights.S})</div>
-      <pre>raw = F*${weights.F} + R*${weights.R} + S*${weights.S}
-score = round(raw * 100)
-      </pre>
+      <div style="font-weight:700">분해 점수(참고)</div>
+      ${mkRow("Fused(결정값)", bd.fused)}
+      ${mkRow("LLM-only", bd.llmOnly)}
+      ${mkRow("Heuristic-only", bd.heurOnly)}
+      ${(!bd.fused && !bd.llmOnly && !bd.heurOnly) ? '<div class="explain">추가 분해 점수가 제공되지 않았습니다.</div>' : ''}
     </div>
 
     <div class="section">
       <div style="font-weight:700">취약점/판단 근거 (LLM/휴리스틱)</div>
       <div class="reasons">
         ${reasons.function_change ? `<div><strong>기능변경:</strong> ${escapeHtml(reasons.function_change)}</div>` : ""}
-        ${reasons.stability_risk ? `<div><strong>안정성:</strong> ${escapeHtml(reasons.stability_risk)}</div>` : ""}
+        ${reasons.resource_usage ? `<div><strong>자원/안정성:</strong> ${escapeHtml(reasons.resource_usage)}</div>` : ""}
         ${reasons.security_dependency ? `<div><strong>보안/의존성:</strong> ${escapeHtml(reasons.security_dependency)}</div>` : ""}
-        ${(!reasons.function_change && !reasons.stability_risk && !reasons.security_dependency) ? `<div class="explain">추가 설명이 없습니다.</div>` : ""}
+        ${(!reasons.function_change && !reasons.resource_usage && !reasons.security_dependency) ? `<div class="explain">추가 설명이 없습니다.</div>` : ""}
       </div>
+    </div>
+
+    <div class="section">
+      <div style="font-weight:700">신호값(0~1) & 최상위 가중치</div>
+      ${renderSignalTable(signalTable, topWeights)}
     </div>
 
     <div class="section">
@@ -209,18 +279,12 @@ score = round(raw * 100)
   document.body.appendChild(overlay);
 
   function removeModal() {
-    try { overlay.remove(); } catch{ /* ignore */ }
+    try { overlay.remove(); } catch { /* ignore */ }
     window.removeEventListener("keydown", onKey);
   }
+  function onKey(e) { if (e.key === "Escape") removeModal(); }
 
-  function onKey(e) {
-    if (e.key === "Escape") removeModal();
-  }
-
-  overlay.addEventListener("click", (ev) => {
-    if (ev.target === overlay) removeModal();
-  });
-
+  overlay.addEventListener("click", (ev) => { if (ev.target === overlay) removeModal(); });
   modal.querySelectorAll(".close-btn").forEach(btn => btn.addEventListener("click", removeModal));
   window.addEventListener("keydown", onKey);
 }
@@ -234,14 +298,13 @@ function renderApprovalCard(snippet, analysis) {
   const filename = snippet.filename || null;
   const score = analysis?.score ?? null;
   const severity = analysis?.severity ?? null;
-  const vector = Array.isArray(analysis?.vector) ? analysis.vector : null; // [F,R,S] 0..1
+  const vector = Array.isArray(analysis?.vector) ? analysis.vector : null; // [F,R,D] 0..1
   const reasons = analysis?.reasons || {};
 
-  // 벡터를 %로 표기
   const fmtPct = (x) => (typeof x === "number" ? Math.round(x * 100) : 0);
   const F = vector ? fmtPct(vector[0]) : null;
   const R = vector ? fmtPct(vector[1]) : null;
-  const S = vector ? fmtPct(vector[2]) : null;
+  const D = vector ? fmtPct(vector[2]) : null;
 
   const card = document.createElement("div");
   card.className = "approval-card critical";
@@ -258,16 +321,16 @@ function renderApprovalCard(snippet, analysis) {
           ? `<div class="vector-line" style="display:flex;gap:12px;margin-bottom:8px;">
               <span>F ${F}%</span>
               <span>R ${R}%</span>
-              <span>S ${S}%</span>
+              <span>D ${D}%</span>
             </div>`
           : ""
       }
 
       ${
-        (reasons.function_change || reasons.stability_risk || reasons.security_dependency)
+        (reasons.function_change || reasons.resource_usage || reasons.security_dependency)
           ? `<div class="reasons">
               ${reasons.function_change ? `<div>기능변경: ${escapeHtml(reasons.function_change)}</div>` : ""}
-              ${reasons.stability_risk ? `<div>안정성: ${escapeHtml(reasons.stability_risk)}</div>` : ""}
+              ${reasons.resource_usage ? `<div>자원/안정성: ${escapeHtml(reasons.resource_usage)}</div>` : ""}
               ${reasons.security_dependency ? `<div>보안/의존성: ${escapeHtml(reasons.security_dependency)}</div>` : ""}
             </div>`
           : ""
@@ -320,7 +383,6 @@ function renderApprovalCard(snippet, analysis) {
 
   // 자세히 보기: analysis + snippet을 모달로 보여줌
   card.querySelector(".details-btn")?.addEventListener("click", () => {
-    // analysis may be null — fallback
     const a = analysis || { vector: vector || [0,0,0], score: score ?? 0, severity: severity ?? "green", reasons: reasons || {} };
     showAnalysisModal(a, { language: language, code: code, filename: filename });
   });
@@ -340,7 +402,7 @@ window.addEventListener("message", (ev) => {
   }
 
   if (msg.type === "analysis") {
-    // analysis: { vector, score, severity, suggestedFilename, language, code, reasons? }
+    // 확장에서 전달: { vector, score, severity, suggestedFilename, language, code, reasons?, breakdown?, signalTable?, weights? }
     window.__lastAnalysis = {
       vector: msg.vector,
       score: msg.score,
@@ -348,7 +410,10 @@ window.addEventListener("message", (ev) => {
       suggestedFilename: msg.suggestedFilename,
       language: msg.language,
       code: msg.code,
-      reasons: msg.reasons || {}
+      reasons: msg.reasons || {},
+      breakdown: msg.breakdown || null,
+      signalTable: msg.signalTable || null,
+      weights: msg.weights || null
     };
     return;
   }

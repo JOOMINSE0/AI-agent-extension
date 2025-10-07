@@ -1,9 +1,11 @@
 {
   "name": "ai-approval-agent",
   "displayName": "AI Approval Agent",
+  "description": "FRD(기능/자원/의존성) 2단 가중치 + 휴리스틱/LLM 융합으로 코드 변경 위험을 시각화하고 승인 게이트를 제공합니다.",
   "publisher": "minseo",
   "version": "0.0.1",
   "engines": { "vscode": "^1.80.0" },
+  "categories": ["Other"],
   "main": "./out/extension.js",
   "activationEvents": [
     "onView:aiApprovalView",
@@ -40,23 +42,52 @@
         "aiApproval.ollama.endpoint": {
           "type": "string",
           "default": "http://210.110.103.64:11434",
-          "description": "Ollama server URL (기본: 학교 VPN 서버)"
+          "description": "Ollama server URL (기본: 학교 VPN 서버). 마지막 슬래시는 자동 제거됩니다."
         },
         "aiApproval.ollama.model": {
           "type": "string",
           "default": "llama3.1:8b",
           "description": "Ollama model name (예: llama3.1:8b, mistral, qwen:7b)"
+        },
+        "aiApproval.weights.functionality": {
+          "type": "number",
+          "default": 0.4,
+          "minimum": 0,
+          "maximum": 1,
+          "description": "최상위 가중치: Functionality(F). R, D와 합이 1이 되도록 설정 권장."
+        },
+        "aiApproval.weights.resource": {
+          "type": "number",
+          "default": 0.3,
+          "minimum": 0,
+          "maximum": 1,
+          "description": "최상위 가중치: Resource Usage(R). F, D와 합이 1이 되도록 설정 권장."
+        },
+        "aiApproval.weights.dependency": {
+          "type": "number",
+          "default": 0.3,
+          "minimum": 0,
+          "maximum": 1,
+          "description": "최상위 가중치: Dependability(D). F, R과 합이 1이 되도록 설정 권장."
+        },
+        "aiApproval.fusion.alpha": {
+          "type": "number",
+          "default": 0.6,
+          "minimum": 0,
+          "maximum": 1,
+          "description": "휴리스틱과 LLM 자가평가 융합 비율. 1.0은 휴리스틱 100%, 0.0은 LLM 100%."
         }
       }
     }
   },
   "scripts": {
-    "watch": "tsc -watch -p ./",
+    "watch": "tsc -w -p ./",
     "compile": "tsc -p ./"
   },
   "devDependencies": {
     "@types/node": "^18.0.0",
     "@types/vscode": "^1.80.0",
     "typescript": "^5.3.0"
-  }
+  },
+  "extensionKind": ["workspace"]
 }
