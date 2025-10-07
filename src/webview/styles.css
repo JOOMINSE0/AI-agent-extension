@@ -85,6 +85,10 @@ pre.code-preview {
 .score-banner.yellow {
   background: #b8860b;
 }
+/* 🔶 오렌지(High) 등급 추가 */
+.score-banner.orange {
+  background: #d97706; /* tailwind amber-600 느낌 */
+}
 .score-banner.green {
   background: #006400;
 }
@@ -131,6 +135,7 @@ pre.code-preview {
   line-height: 1.35;
 }
 
+/* 분석 모달 */
 .analysis-modal-overlay {
   position: fixed;
   inset: 0;
@@ -167,3 +172,16 @@ pre.code-preview {
   font-size: 20px;
   line-height: 1;
 }
+
+/* 모달 KPI 칩 색상 (등급 배지) */
+.analysis-modal .kpi .big {
+  font-weight:700;
+  font-size:28px;
+  padding:8px 12px;
+  border-radius:6px;
+}
+.analysis-modal .kpi .green { background:#1e7a2d; color:white; }
+.analysis-modal .kpi .yellow { background:#b8860b; color:white; }
+/*  오렌지(High) 등급 추가 */
+.analysis-modal .kpi .orange { background:#d97706; color:white; }
+.analysis-modal .kpi .red { background:#b31c1c; color:white; }
