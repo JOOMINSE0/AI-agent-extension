@@ -72,7 +72,7 @@
         },
         "aiApproval.fusion.alpha": {
           "type": "number",
-          "default": 0.3,
+          "default": 0.6,
           "minimum": 0,
           "maximum": 1,
           "description": "휴리스틱과 LLM 자가평가 융합 비율. 1.0은 휴리스틱 100%, 0.0은 LLM 100%."

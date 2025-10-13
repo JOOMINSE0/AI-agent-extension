@@ -11,7 +11,10 @@ if (!chat || !form || !input) {
   console.error("webview DOM not ready: missing #chat/#composer/#prompt");
 }
 
-// --- 모달 스타일(동적 삽입) ---
+/* ─────────────────────────────────────────────────────────────────────────────
+ * ① 모달/채팅용 스타일 주입
+ * ────────────────────────────────────────────────────────────────────────────*/
+// --- 모달 기본 스타일(기존) ---
 (function injectModalStyles() {
   const css = `
 /* analysis modal */
@@ -45,7 +48,7 @@ if (!chat || !form || !input) {
 .analysis-modal .kpi .big { font-weight:700; font-size:28px; padding:8px 12px; border-radius:6px; }
 .analysis-modal .kpi .green { background:#1e7a2d; color:white; }
 .analysis-modal .kpi .yellow { background:#b8860b; color:white; }
-.analysis-modal .kpi .orange { background:#d9822b; color:white; } /* ✅ ORANGE 추가 */
+.analysis-modal .kpi .orange { background:#d9822b; color:white; } /* ✅ ORANGE */
 .analysis-modal .kpi .red { background:#b31c1c; color:white; }
 .analysis-modal .vector-row { display:flex; gap:16px; margin-bottom:8px; }
 .analysis-modal .vector-row .item { min-width:120px; }
@@ -64,7 +67,99 @@ if (!chat || !form || !input) {
   document.head.appendChild(style);
 })();
 
-// 유틸: escape & append
+// --- 채팅 마크다운 가독성 스타일(신규) ---
+(function injectChatMdStyles() {
+  const css = `
+/* 기본 메시지 버블 */
+.msg {
+  margin: 6px 0;
+  padding: 6px 10px;
+  border-radius: 6px;
+  max-width: 90%;
+  line-height: 1.4;
+  word-wrap: break-word;
+}
+.msg.user {
+  background: #007acc;
+  color: white;
+  align-self: flex-end;
+}
+.msg.bot {
+  background: #2d2d2d;
+  color: #f0f0f0;
+  align-self: flex-start;
+}
+
+/* 마크다운 본문 */
+.msg.bot .md { line-height:1.6; }
+.msg.bot .md h1,.msg.bot .md h2,.msg.bot .md h3{ margin:10px 0 6px; font-weight:700; }
+.msg.bot .md h1{ font-size:16px; } .msg.bot .md h2{ font-size:15px; } .msg.bot .md h3{ font-size:14px; }
+.msg.bot .md p{ margin:6px 0; }
+.msg.bot .md code{ padding:1px 4px; border-radius:4px; background:rgba(255,255,255,0.08); }
+.msg.bot .md pre{ background:rgba(0,0,0,0.25); border:1px solid rgba(255,255,255,0.08);
+  padding:10px; border-radius:8px; overflow:auto; white-space:pre; font-size:12px; }
+.msg.bot .md .fence-title{ opacity:.85; font-size:12px; margin:6px 0 -2px; }
+.msg.bot .md .codebox{ position:relative; }
+.msg.bot .md .copy{ position:absolute; top:8px; right:8px; font-size:11px;
+  padding:4px 6px; border-radius:6px; background:#2e2e2e; color:#ddd; border:1px solid #555; cursor:pointer;}
+
+/* 승인 카드 등 기존 컴포넌트 일부(요약) */
+.approval-card {
+  border: 1px solid var(--vscode-editorWidget-border, #555);
+  border-radius: 12px;
+  margin: 10px 0;
+  padding: 12px;
+  background: var(--vscode-editorWidget-background, #1e1e1e);
+  color: var(--vscode-editor-foreground, #ddd);
+}
+.approval-card .badge {
+  float: right;
+  font-size: 11px;
+  padding: 4px 6px;
+  border-radius: 6px;
+  background: #444;
+  text-align: center;
+  line-height: 1.2;
+  font-weight: bold;
+  color: #eee;
+}
+.approval-card .card-main { clear: both; }
+pre.code-preview {
+  background: var(--vscode-editor-background, #1e1e1e);
+  border: 1px solid var(--vscode-editorWidget-border, #555);
+  border-radius: 10px;
+  padding: 10px;
+  overflow: auto;
+  max-height: 240px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  font-size: 12px;
+  line-height: 1.4;
+  margin-top: 8px;
+}
+.score-banner { display:flex; align-items:center; justify-content:space-between; border-radius:8px; padding:6px 10px; margin-bottom:8px; color:white; font-weight:bold; }
+.score-banner .score-value { font-size:18px; margin-right:8px; }
+.score-banner.red { background:#8b0000; }
+.score-banner.yellow { background:#b8860b; }
+.score-banner.orange { background:#d97706; }
+.score-banner.green { background:#006400; }
+.approval-card .actions { margin-top:10px; display:flex; gap:8px; }
+.approval-card button { padding:6px 12px; border-radius:6px; border:none; cursor:pointer; font-size:13px; }
+.approval-card button.approve-btn { background:#0e639c; color:white; }
+.approval-card button.reject-btn { background:#333; color:#ddd; }
+.approval-card button.details-btn { background:transparent; border:1px solid #777; color:#ccc; }
+.vector-line { display:flex; gap:12px; margin:6px 0 8px; opacity:.9; font-size:12px; }
+.reasons { font-size:12px; color:#bbb; margin-bottom:8px; line-height:1.35; }
+`;
+  const style = document.createElement("style");
+  style.textContent = css;
+  document.head.appendChild(style);
+})();
+
+/* ─────────────────────────────────────────────────────────────────────────────
+ * ② 유틸
+ * ────────────────────────────────────────────────────────────────────────────*/
 function escapeHtml(str) {
   return String(str)
     .replace(/&/g, "&amp;")
@@ -75,20 +170,14 @@ function escapeHtml(str) {
 function append(role, text) {
   const div = document.createElement("div");
   div.className = `msg ${role}`;
-  div.textContent = text;
+  // 사용자 메시지는 단순 텍스트로
+  if (role === "user") {
+    div.textContent = text;
+  } else {
+    // 봇 메시지는 마크다운 렌더 결과로
+    div.innerHTML = `<div class="md">${renderMarkdown(text)}</div>`;
+  }
   chat.appendChild(div);
-  chat.scrollTop = chat.scrollHeight;
-}
-
-let botDiv = null;
-let lastBotBuffer = "";
-
-// 새 봇 라인 시작
-function startBotLine() {
-  botDiv = document.createElement("div");
-  botDiv.className = "msg bot";
-  botDiv.textContent = "";
-  chat.appendChild(botDiv);
   chat.scrollTop = chat.scrollHeight;
 }
 
@@ -134,29 +223,44 @@ function detectSuggestedFileName(fullText, fallbackLang) {
 }
 
 /**
- * 점수(0~100) → 0.0~10.0 변환
+ * 점수(0~100 또는 0~10 정수) → 0.0~10.0 변환
  */
 function toScore10(score) {
   if (typeof score !== "number" || isNaN(score)) return 0;
-  const s10 = score / 10;
-  return Math.max(0, Math.min(10, s10));
+  // 이미 0~10 범위면 그대로, 0~100이면 10으로 나눔
+  const s = score > 10 ? score / 10 : score;
+  const s10 = Math.round(Math.max(0, Math.min(10, s)) * 10) / 10; // 소수 1자리
+  return s10;
+}
+
+/**
+ * 레벨별 권장 액션
+ */
+function actionFromLevel(level) {
+  switch (level) {
+    case "CRITICAL": return "Comprehensive audit needed";
+    case "HIGH":     return "Detailed review required";
+    case "MEDIUM":   return "Standard review process";
+    default:         return "Quick scan sufficient";
+  }
 }
 
 /**
  * CRAI 표준 경계로 색상/등급 산출 (0.0~10.0)
+ * 0.0–3.9 LOW/Green, 4.0–6.9 MEDIUM/Yellow, 7.0–8.9 HIGH/Orange, 9.0–10.0 CRITICAL/Red
  */
 function labelFromScore10(s10) {
-  if (s10 >= 9.0) return { key: "RED", level: "CRITICAL", severity: "red" };
-  if (s10 >= 7.0) return { key: "ORANGE", level: "HIGH", severity: "orange" };
-  if (s10 >= 4.0) return { key: "YELLOW", level: "MEDIUM", severity: "yellow" };
-  return { key: "GREEN", level: "LOW", severity: "green" };
+  if (s10 >= 9.0) return { key: "RED", level: "CRITICAL", severity: "red", action: actionFromLevel("CRITICAL") };
+  if (s10 >= 7.0) return { key: "ORANGE", level: "HIGH", severity: "orange", action: actionFromLevel("HIGH") };
+  if (s10 >= 4.0) return { key: "YELLOW", level: "MEDIUM", severity: "yellow", action: actionFromLevel("MEDIUM") };
+  return { key: "GREEN", level: "LOW", severity: "green", action: actionFromLevel("LOW") };
 }
 
 /**
  * 신호 테이블 렌더링 (analysis.signalTable + 최상위 가중치)
  */
 function renderSignalTable(signalTable, topWeights) {
-  if (!signalTable) return '<div class="explain">신호값이 제공되지 않았습니다.</div>';
+  if (!signalTable) return '<div class="explain">No signal values provided.</div>';
 
   const clamp01 = (x) => Math.max(0, Math.min(1, Number(x) || 0)); // ✅ 0~1 클램프
   const pct = (x) => `${Math.round(clamp01(x) * 100)}%`;
@@ -165,7 +269,7 @@ function renderSignalTable(signalTable, topWeights) {
   // F
   if (signalTable.F) {
     rows.push(
-      `<div class="th"><strong>F · 기능 변경</strong>${topWeights ? `<span class="badge-mini">wF ${topWeights.wF}</span>` : ""}</div><div class="th">값(0~1)</div><div class="th">비고</div>`,
+      `<div class="th"><strong>F · Functionality</strong>${topWeights ? `<span class="badge-mini">wF ${topWeights.wF}</span>` : ""}</div><div class="th">Value (0–1)</div><div class="th">Notes</div>`,
       `<div>Changed API Ratio</div><div>${clamp01(signalTable.F.changedApiRatio).toFixed(2)}</div><div>${pct(signalTable.F.changedApiRatio)}</div>`,
       `<div>Core Module Modified</div><div>${clamp01(signalTable.F.coreModuleModified).toFixed(0)}</div><div>core/domain/service</div>`,
       `<div>Code Change Size</div><div>${clamp01(signalTable.F.diffLineRatio).toFixed(2)}</div><div>${pct(signalTable.F.diffLineRatio)}</div>`,
@@ -176,21 +280,21 @@ function renderSignalTable(signalTable, topWeights) {
   // R
   if (signalTable.R) {
     rows.push(
-      `<div class="th" style="margin-top:6px;"><strong>R · 자원/안정성</strong>${topWeights ? `<span class="badge-mini">wR ${topWeights.wR}</span>` : ""}</div><div class="th">값(0~1)</div><div class="th">비고</div>`,
-      `<div>Algorithm Complexity</div><div>${clamp01(signalTable.R.timeComplexity).toFixed(2)}</div><div>Big-O 매핑</div>`,
+      `<div class="th" style="margin-top:6px;"><strong>R · Resource/Stability</strong>${topWeights ? `<span class="badge-mini">wR ${topWeights.wR}</span>` : ""}</div><div class="th">Value (0–1)</div><div class="th">Notes</div>`,
+      `<div>Algorithm Complexity</div><div>${clamp01(signalTable.R.timeComplexity).toFixed(2)}</div><div>Big-O mapping</div>`,
       `<div>Memory Allocation Increase</div><div>${clamp01(signalTable.R.memIncreaseRatio).toFixed(2)}</div><div>${pct(signalTable.R.memIncreaseRatio)}</div>`,
-      `<div>External Call Addition</div><div>${clamp01(signalTable.R.externalCallNorm).toFixed(2)}</div><div>지연/비용 정규화</div>`
+      `<div>External Call Addition</div><div>${clamp01(signalTable.R.externalCallNorm).toFixed(2)}</div><div>Latency/cost normalization</div>`
     );
   }
 
   // D
   if (signalTable.D) {
     rows.push(
-      `<div class="th" style="margin-top:6px;"><strong>D · 보안/의존성</strong>${topWeights ? `<span class="badge-mini">wD ${topWeights.wD}</span>` : ""}</div><div class="th">값(0~1)</div><div class="th">비고</div>`,
-      `<div>CVE Severity</div><div>${clamp01(signalTable.D.cveSeverity).toFixed(2)}</div><div>0~1</div>`,
-      `<div>Library Reputation</div><div>${clamp01(signalTable.D.libReputation).toFixed(2)}</div><div>높을수록 안전</div>`,
+      `<div class="th" style="margin-top:6px;"><strong>D · Dependency/Security</strong>${topWeights ? `<span class="badge-mini">wD ${topWeights.wD}</span>` : ""}</div><div class="th">Value (0–1)</div><div class="th">Notes</div>`,
+      `<div>CVE Severity</div><div>${clamp01(signalTable.D.cveSeverity).toFixed(2)}</div><div>0–1</div>`,
+      `<div>Library Reputation</div><div>${clamp01(signalTable.D.libReputation).toFixed(2)}</div><div>Higher is safer</div>`,
       `<div>License Mismatch</div><div>${clamp01(signalTable.D.licenseMismatch).toFixed(0)}</div><div>0/1</div>`,
-      `<div>Sensitive Permission</div><div>${clamp01(signalTable.D.sensitivePerm).toFixed(2)}</div><div>0~1</div>`
+      `<div>Sensitive Permission</div><div>${clamp01(signalTable.D.sensitivePerm).toFixed(2)}</div><div>0–1</div>`
     );
   }
 
@@ -205,16 +309,17 @@ function renderSignalTable(signalTable, topWeights) {
 function showAnalysisModal(analysis = {}, snippet = {}) {
   if (document.querySelector(".analysis-modal-overlay")) return;
 
-  // 헤드라인(최종/FUSED)
-  const headScore = typeof analysis.score === "number" ? analysis.score : 0;
-  const score10 = typeof analysis.score10 === "number" ? analysis.score10 : toScore10(headScore);
-  const label = analysis.level && analysis.severity
+  // 최종 점수(10점 스케일)과 라벨 결정
+  const scoreRaw = typeof analysis.score === "number" ? analysis.score : 0;
+  const score10 = typeof analysis.score10 === "number" ? analysis.score10 : toScore10(scoreRaw);
+  const label = (analysis.level && analysis.severity)
     ? { key: analysis.level === "CRITICAL" ? "RED" : analysis.level === "HIGH" ? "ORANGE" : analysis.level === "MEDIUM" ? "YELLOW" : "GREEN",
         level: analysis.level,
-        severity: analysis.severity }
-    : labelFromScore10(score10); // ✅ 확장 미지원 시 자체 계산
+        severity: analysis.severity,
+        action: actionFromLevel(analysis.level) }
+    : labelFromScore10(score10);
 
-  // F/R/D 벡터(기본: FUSED)
+  // F/R/D 벡터
   const fusedVector = Array.isArray(analysis.vector) ? analysis.vector : [0, 0, 0];
   const clamp01 = (x) => Math.max(0, Math.min(1, Number(x) || 0));
   const pctNum = (x) => Math.round(clamp01(x) * 100);
@@ -232,11 +337,13 @@ function showAnalysisModal(analysis = {}, snippet = {}) {
     if (!entry || !Array.isArray(entry.vector)) return "";
     const v = entry.vector;
     const _F = pctNum(v[0]), _R = pctNum(v[1]), _D = pctNum(v[2]);
+    const s10 = typeof entry.score === "number" ? toScore10(entry.score) : null;
+    const sev = (entry.severity || "").toUpperCase();
     return `
       <div style="display:flex;gap:12px;align-items:center;margin:4px 0;">
         <div style="min-width:120px;"><strong>${labelText}</strong></div>
-        <div style="min-width:70px;">점수: ${typeof entry.score==='number' ? entry.score : "-"}</div>
-        <div style="min-width:80px;">등급: ${(entry.severity||"").toUpperCase()}</div>
+        <div style="min-width:110px;">Score: ${s10 !== null ? s10.toFixed(1) + ' / 10' : "-"}</div>
+        <div style="min-width:110px;">Level: ${sev}</div>
         <div>F ${_F}% / R ${_R}% / D ${_D}%</div>
       </div>`;
   };
@@ -248,51 +355,48 @@ function showAnalysisModal(analysis = {}, snippet = {}) {
 
   modal.innerHTML = `
     <button class="close-btn" title="Close">&times;</button>
-    <h2>승인 상세 분석 결과</h2>
+    <h2>Approval Analysis Details</h2>
 
     <div class="kpi">
-      <div class="big ${label.severity}">${headScore}</div>
+      <div class="big ${label.severity}">${score10.toFixed(1)} / 10</div>
       <div style="flex:1">
         <div style="font-weight:700">
-          ${label.severity==='red' ? '승인 필수 (Human review required)'
-            : label.severity==='orange' ? '상세 검토 필요 (Detailed review required)'
-            : label.severity==='yellow' ? '승인 필요'
-            : '안전 (자동 승인 가능)'}
+          ${label.level} — ${label.action}
         </div>
         <div class="explain">
-          헤드라인은 최종 융합 점수(FUSED)를 그대로 표시합니다.
+          The headline represents the final fused score (FUSED).
           ${topWeights ? `<span class="badge-mini">Weights F:${topWeights.wF} R:${topWeights.wR} D:${topWeights.wD}</span>` : ""}
         </div>
       </div>
     </div>
 
     <div class="vector-row">
-      <div class="item"><strong>F (기능 변경)</strong><div>${F}%</div></div>
-      <div class="item"><strong>R (자원/안정성)</strong><div>${R}%</div></div>
-      <div class="item"><strong>D (보안/의존성)</strong><div>${D}%</div></div>
+      <div class="item"><strong>F (Functionality)</strong><div>${F}%</div></div>
+      <div class="item"><strong>R (Resource/Stability)</strong><div>${R}%</div></div>
+      <div class="item"><strong>D (Dependency/Security)</strong><div>${D}%</div></div>
     </div>
 
     <div class="section">
-      <div style="font-weight:700">분해 점수(참고)</div>
-      ${mkRow("Fused(결정값)", bd.fused)}
+      <div style="font-weight:700">Decomposed Scores (Reference)</div>
+      ${mkRow("Fused", bd.fused)}
       ${mkRow("LLM-only", bd.llmOnly)}
       ${mkRow("Heuristic-only", bd.heurOnly)}
-      ${(!bd.fused && !bd.llmOnly && !bd.heurOnly) ? '<div class="explain">추가 분해 점수가 제공되지 않았습니다.</div>' : ''}
+      ${(!bd.fused && !bd.llmOnly && !bd.heurOnly) ? '<div class="explain">No additional decomposed scores available.</div>' : ''}
     </div>
 
     <div class="section">
-      <div style="font-weight:700">취약점/판단 근거 (LLM/휴리스틱)</div>
+      <div style="font-weight:700">Rationale (LLM & Heuristics)</div>
       <div class="reasons">
-        ${reasons.function_change ? `<div><strong>기능변경:</strong> ${escapeHtml(reasons.function_change)}</div>` : ""}
-        ${reasons.resource_usage ? `<div><strong>자원/안정성:</strong> ${escapeHtml(reasons.resource_usage)}</div>` : ""}
-        ${reasons.security_dependency ? `<div><strong>보안/의존성:</strong> ${escapeHtml(reasons.security_dependency)}</div>` : ""}
-        ${(!reasons.function_change && !reasons.resource_usage && !reasons.security_dependency) ? `<div class="explain">추가 설명이 없습니다.</div>` : ""}
+        ${reasons.function_change ? `<div><strong>Function Change:</strong> ${escapeHtml(reasons.function_change)}</div>` : ""}
+        ${reasons.resource_usage ? `<div><strong>Resource Usage:</strong> ${escapeHtml(reasons.resource_usage)}</div>` : ""}
+        ${reasons.security_dependency ? `<div><strong>Security/Dependency:</strong> ${escapeHtml(reasons.security_dependency)}</div>` : ""}
+        ${(!reasons.function_change && !reasons.resource_usage && !reasons.security_dependency) ? `<div class="explain">No additional explanation provided.</div>` : ""}
       </div>
     </div>
 
     <div class="section">
-      <div style="font-weight:700">관련 코드 스니펫</div>
-      <div class="explain">파일명 제안: ${escapeHtml(snippet.filename || "(없음)")}</div>
+      <div style="font-weight:700">Code Snippet</div>
+      <div class="explain">Suggested filename: ${escapeHtml(snippet.filename || "(none)")}</div>
       <pre>${escapeHtml((snippet.code || "").slice(0, 2000))}${(snippet.code && snippet.code.length>2000) ? "\n... (truncated)" : ""}</pre>
     </div>
 
@@ -317,19 +421,19 @@ function showAnalysisModal(analysis = {}, snippet = {}) {
 
 /**
  * 승인 카드 렌더링
- * - analysis.score / analysis.severity(미존재 가능) / analysis.vector / analysis.reasons 반영
- * - CRAI 표준(0.0–10.0) 경계로 오렌지 표시
+ * - CRAI 표준(0.0–10.0) 경계 적용 (LOW/MEDIUM/HIGH/CRITICAL)
+ * - 카드 상단에 점수(소수 1자리)와 레벨 표기
  */
 function renderApprovalCard(snippet, analysis) {
   const { language, code } = snippet;
   const filename = snippet.filename || null;
 
-  // 점수/등급 계산 (확장에 score10/level이 있으면 그대로, 없으면 score→score10 변환)
-  const score = typeof analysis?.score === "number" ? analysis.score : null;
-  const score10 = typeof analysis?.score10 === "number" ? analysis.score10 : toScore10(score || 0);
+  // 점수/등급 계산
+  const scoreRaw = typeof analysis?.score === "number" ? analysis.score : 0;
+  const score10 = typeof analysis?.score10 === "number" ? analysis.score10 : toScore10(scoreRaw);
   const label = (analysis?.level && analysis?.severity)
     ? { key: analysis.level === "CRITICAL" ? "RED" : analysis.level === "HIGH" ? "ORANGE" : analysis.level === "MEDIUM" ? "YELLOW" : "GREEN",
-        level: analysis.level, severity: analysis.severity }
+        level: analysis.level, severity: analysis.severity, action: actionFromLevel(analysis.level) }
     : labelFromScore10(score10);
 
   const vector = Array.isArray(analysis?.vector) ? analysis.vector : null; // [F,R,D] 0..1
@@ -344,11 +448,11 @@ function renderApprovalCard(snippet, analysis) {
   const card = document.createElement("div");
   card.className = "approval-card critical";
   card.innerHTML = `
-    <div class="badge">REVIEW<br/>승인 필요</div>
+    <div class="badge">REVIEW<br/>Required</div>
     <div class="card-main">
       <div class="score-banner ${label.severity}">
-        <div class="score-value">${score ?? ""}</div>
-        <div class="score-label">${label.key}</div>
+        <div class="score-value">${score10.toFixed(1)} / 10</div>
+        <div class="score-label">${label.level}</div>
       </div>
 
       ${
@@ -364,18 +468,18 @@ function renderApprovalCard(snippet, analysis) {
       ${
         (reasons.function_change || reasons.resource_usage || reasons.security_dependency)
           ? `<div class="reasons">
-              ${reasons.function_change ? `<div>기능변경: ${escapeHtml(reasons.function_change)}</div>` : ""}
-              ${reasons.resource_usage ? `<div>자원/안정성: ${escapeHtml(reasons.resource_usage)}</div>` : ""}
-              ${reasons.security_dependency ? `<div>보안/의존성: ${escapeHtml(reasons.security_dependency)}</div>` : ""}
+              ${reasons.function_change ? `<div>Function Change: ${escapeHtml(reasons.function_change)}</div>` : ""}
+              ${reasons.resource_usage ? `<div>Resource Usage: ${escapeHtml(reasons.resource_usage)}</div>` : ""}
+              ${reasons.security_dependency ? `<div>Security/Dependency: ${escapeHtml(reasons.security_dependency)}</div>` : ""}
             </div>`
           : ""
       }
 
-      <h3>생성된 코드 검토</h3>
+      <h3>Generated Code Review</h3>
       <ul class="meta">
-        <li>언어: ${escapeHtml(language || "plaintext")}</li>
-        <li>길이: ${code.length} chars</li>
-        ${filename ? `<li>파일명 제안: ${escapeHtml(filename)}</li>` : ""}
+        <li>Language: ${escapeHtml(language || "plaintext")}</li>
+        <li>Length: ${code.length} chars</li>
+        ${filename ? `<li>Suggested filename: ${escapeHtml(filename)}</li>` : ""}
       </ul>
 
       <pre class="code-preview"><code>${escapeHtml(code.slice(0, 1200))}${
@@ -383,9 +487,9 @@ function renderApprovalCard(snippet, analysis) {
       }</code></pre>
 
       <div class="actions">
-        <button class="approve-btn">승인</button>
-        <button class="reject-btn ghost">거절</button>
-        <button class="details-btn outline">자세히 보기</button>
+        <button class="approve-btn">Approve</button>
+        <button class="reject-btn ghost">Reject</button>
+        <button class="details-btn outline">View Details</button>
       </div>
     </div>
   `;
@@ -400,8 +504,8 @@ function renderApprovalCard(snippet, analysis) {
       code,
       language,
       filename,
-      score,
-      severity: label.severity //  orange/red/yellow/green 중 하나
+      score: score10,                 // 10점 스케일 전달
+      severity: label.severity        // green/yellow/orange/red
     });
   });
 
@@ -411,16 +515,92 @@ function renderApprovalCard(snippet, analysis) {
       code,
       language,
       filename,
-      score,
+      score: score10,
       severity: label.severity
     });
   });
 
   // 자세히 보기: analysis + snippet을 모달로 보여줌
   card.querySelector(".details-btn")?.addEventListener("click", () => {
-    const a = analysis || { vector: vector || [0,0,0], score: score ?? 0, severity: label.severity, level: label.level, score10 };
+    const a = analysis || { vector: vector || [0,0,0], score: score10, severity: label.severity, level: label.level, score10 };
     showAnalysisModal(a, { language: language, code: code, filename: filename });
   });
+}
+
+/* ─────────────────────────────────────────────────────────────────────────────
+ * ③ 마크다운 렌더러 (경량, 코드펜스 + 텍스트)
+ * ────────────────────────────────────────────────────────────────────────────*/
+function renderMarkdown(md = "") {
+  // 코드펜스 파싱: ```lang\n...\n```
+  const parts = [];
+  let idx = 0;
+  const re = /```([a-zA-Z0-9+#._-]*)\n([\s\S]*?)```/g;
+  let m;
+  while ((m = re.exec(md)) !== null) {
+    parts.push({ t: "text", v: md.slice(idx, m.index) });
+    parts.push({ t: "code", lang: (m[1] || "plaintext").trim(), v: m[2] });
+    idx = m.index + m[0].length;
+  }
+  parts.push({ t: "text", v: md.slice(idx) });
+
+  // 텍스트 렌더: 헤딩/볼드/인라인코드/문단
+  const renderText = (s) => {
+    let x = escapeHtml(s);
+    x = x.replace(/^\s*\*\*([A-Za-z가-힣0-9 _-]+)\*\*\s*$/gm, "<h3>$1</h3>")
+         .replace(/^###\s+(.+)$/gm, "<h3>$1</h3>")
+         .replace(/^##\s+(.+)$/gm, "<h2>$1</h2>")
+         .replace(/^#\s+(.+)$/gm, "<h1>$1</h1>")
+         .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
+         .replace(/`([^`]+?)`/g, "<code>$1</code>");
+    x = x.split(/\n{2,}/).map(p => `<p>${p.replace(/\n/g, "<br/>")}</p>`).join("");
+    return x;
+  };
+
+  const renderCode = (lang, code) => {
+    const safe = escapeHtml(code);
+    const id = "copy_" + Math.random().toString(36).slice(2);
+    return `
+      <div class="fence-title">${lang.toUpperCase()}</div>
+      <div class="codebox">
+        <button class="copy" data-target="${id}">Copy</button>
+        <pre id="${id}"><code class="lang-${lang}">${safe}</code></pre>
+      </div>`;
+  };
+
+  let html = "";
+  for (const seg of parts) {
+    html += seg.t === "text" ? renderText(seg.v) : renderCode(seg.lang, seg.v);
+  }
+  return html;
+}
+
+// 코드블록 Copy 버튼 위임
+document.addEventListener("click", (e) => {
+  const btn = e.target.closest(".copy");
+  if (!btn) return;
+  const id = btn.getAttribute("data-target");
+  const pre = id && document.getElementById(id);
+  if (!pre) return;
+  const text = pre.innerText;
+  navigator.clipboard?.writeText(text).then(() => {
+    btn.textContent = "Copied!";
+    setTimeout(() => (btn.textContent = "Copy"), 900);
+  });
+});
+
+/* ─────────────────────────────────────────────────────────────────────────────
+ * ④ 채팅 스트리밍 UI: 마크다운으로 실시간 렌더
+ * ────────────────────────────────────────────────────────────────────────────*/
+let botDiv = null;
+let lastBotBuffer = "";
+
+// 새 봇 라인 시작 (마크다운 컨테이너)
+function startBotLine() {
+  botDiv = document.createElement("div");
+  botDiv.className = "msg bot";
+  botDiv.innerHTML = '<div class="md"></div>';
+  chat.appendChild(botDiv);
+  chat.scrollTop = chat.scrollHeight;
 }
 
 // 메시지 수신
@@ -430,19 +610,22 @@ window.addEventListener("message", (ev) => {
 
   if (msg.type === "delta") {
     if (!botDiv) startBotLine();
-    botDiv.textContent += msg.text || "";
-    lastBotBuffer += msg.text || "";
+    lastBotBuffer += (msg.text || "");
+    // 마크다운으로 재렌더
+    const md = botDiv.querySelector(".md");
+    if (md) md.innerHTML = renderMarkdown(lastBotBuffer);
     chat.scrollTop = chat.scrollHeight;
     return;
   }
 
   if (msg.type === "analysis") {
     // 확장에서 전달: { vector, score, severity?, score10?, level?, suggestedFilename, language, code, reasons?, breakdown?, signalTable?, weights? }
+    const scoreField = typeof msg.score10 === "number" ? msg.score10 : toScore10(msg.score);
     window.__lastAnalysis = {
       vector: msg.vector,
-      score: msg.score,
+      score: scoreField,               // 내부적으로도 10점 스케일 유지
       severity: msg.severity || null,
-      score10: typeof msg.score10 === "number" ? msg.score10 : toScore10(msg.score),
+      score10: scoreField,
       level: msg.level || null,
       suggestedFilename: msg.suggestedFilename,
       language: msg.language,
@@ -456,7 +639,7 @@ window.addEventListener("message", (ev) => {
   }
 
   if (msg.type === "done") {
-    botDiv = null;
+    // 스트림 종료 → 승인 카드 렌더
     const snippet = extractLastCodeBlock(lastBotBuffer);
     if (snippet && snippet.code && snippet.code.trim().length > 0) {
       const hint = detectSuggestedFileName(
@@ -474,14 +657,15 @@ window.addEventListener("message", (ev) => {
 
       renderApprovalCard({ ...snippet }, analysis);
     }
-    // 다음 턴을 위해 초기화
+    // 다음 턴 초기화
+    botDiv = null;
     lastBotBuffer = "";
     window.__lastAnalysis = null;
     return;
   }
 
   if (msg.type === "error") {
-    append("bot", ` ${msg.message}`);
+    append("bot", `⚠️ ${msg.message}`);
     botDiv = null;
     return;
   }

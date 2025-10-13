@@ -42,6 +42,7 @@ const vscode = __importStar(require("vscode"));
  * - Ollama 스트리밍
  * - 휴리스틱 + LLM 자가평가(JSON: function_change/resource_usage/security_dependency) 융합
  * - 승인 게이트: 위험 명령 차단, RED 확인문자 입력
+ * - 승인 시 적용 위치 선택: 현재 파일 덮어쓰기 / 커서에 삽입 / 새 파일 저장
  */
 function activate(context) {
     console.log("AI Approval Agent is now active!");
@@ -127,7 +128,7 @@ function wireMessages(webview) {
                         const llm = await llmSelfJudgeJSON(endpoint, model, combined, snippet?.code ?? "");
                         // 6) 융합 (휴리스틱 60% + LLM 40% 기본)
                         const fusedVector = fuseVector(heur.vector, llm ? [llm.function_change, llm.resource_usage, llm.security_dependency] : null, alpha);
-                        // 7) 최종 점수 (상위 가중치 적용)
+                        // 7) 최종 점수 (상위 가중치 적용) — 0.0~10.0 스케일
                         const scored = scoreFromVector(fusedVector, { wF, wR, wD });
                         // 참고치(설명력)
                         const llmVector = llm ? [llm.function_change, llm.resource_usage, llm.security_dependency] : heur.vector;
@@ -137,8 +138,8 @@ function wireMessages(webview) {
                         webview.postMessage({
                             type: "analysis",
                             vector: fusedVector,
-                            score: scored.score,
-                            severity: scored.severity,
+                            score: scored.score, // 0.0~10.0
+                            severity: scored.severity, // green/yellow/orange/red
                             weights: scored.weights,
                             suggestedFilename: suggested || null,
                             language: snippet?.language ?? "plaintext",
@@ -404,17 +405,30 @@ llm, alpha) {
         alpha * heur[2] + (1 - alpha) * llm[2]
     ];
 }
-/* ---------- Final scoring ---------- */
+/* ---------- Final scoring (0.0~10.0) ---------- */
 function scoreFromVector(v, top) {
     const cfg = top ?? { wF: 0.40, wR: 0.30, wD: 0.30 };
-    const raw = v[0] * cfg.wF + v[1] * cfg.wR + v[2] * cfg.wD; // 0~1
-    const score = Math.round(raw * 100);
+    const raw = v[0] * cfg.wF + v[1] * cfg.wR + v[2] * cfg.wD; // 0..1
+    const score = Math.round(raw * 10 * 10) / 10; // 소수 1자리 (예: 7.3)
     let severity = "green";
-    if (score >= 70)
+    let level = "LOW";
+    let action = "Quick scan sufficient";
+    if (score >= 9.0) {
         severity = "red";
-    else if (score >= 40)
+        level = "CRITICAL";
+        action = "Comprehensive audit needed";
+    }
+    else if (score >= 7.0) {
+        severity = "orange";
+        level = "HIGH";
+        action = "Detailed review required";
+    }
+    else if (score >= 4.0) {
         severity = "yellow";
-    return { score, severity, weights: cfg };
+        level = "MEDIUM";
+        action = "Standard review process";
+    }
+    return { score, severity, level, action, weights: cfg };
 }
 /* ---------- Filename hint ---------- */
 function detectSuggestedFileName(fullText, _fallbackLang) {
@@ -437,7 +451,9 @@ function detectSuggestedFileName(fullText, _fallbackLang) {
         return null;
     return last.replace(/^\/+/, "");
 }
-/* ---------- Approval: terminal-or-file ---------- */
+/* ======================================================================
+ *  승인 후 코드 적용: (1) 현재 파일 덮어쓰기 (2) 커서에 삽입 (3) 새 파일로 저장
+ * ==================================================================== */
 async function handleApproval(code, language, suggested) {
     if (!vscode.workspace.workspaceFolders?.length) {
         vscode.window.showErrorMessage("워크스페이스가 열려 있지 않습니다.");
@@ -475,7 +491,27 @@ async function handleApproval(code, language, suggested) {
         vscode.window.showInformationMessage(`터미널에서 ${lines.length}개 명령을 실행했습니다.`);
         return;
     }
-    // 일반 코드 저장
+    // === 코드 적용 위치 선택 ===
+    const choice = await vscode.window.showQuickPick([
+        { label: "Overwrite current file", description: "활성 에디터의 전체 내용을 교체" },
+        { label: "Insert at cursor", description: "활성 에디터의 현재 커서 위치에 삽입" },
+        { label: "Save as new file", description: "새 파일로 저장 (현재 동작)" }
+    ], { placeHolder: "승인된 코드를 어디에 적용할까요?" });
+    if (!choice)
+        return;
+    if (choice.label === "Overwrite current file") {
+        const uri = await overwriteActiveEditor(code);
+        if (uri)
+            vscode.window.showInformationMessage(`현재 파일에 덮어썼습니다: ${uri.fsPath}`);
+        return;
+    }
+    if (choice.label === "Insert at cursor") {
+        const uri = await insertAtCursor(code);
+        if (uri)
+            vscode.window.showInformationMessage(`현재 파일 커서 위치에 삽입했습니다: ${uri.fsPath} (저장은 Ctrl/Cmd+S)`);
+        return;
+    }
+    // --- 새 파일 저장 (기존 로직) ---
     const root = vscode.workspace.workspaceFolders[0].uri;
     const ext = guessExtension(language);
     const targetRel = sanitizeRelativePath(suggested) || (await nextAutoName(root, ext));
@@ -486,6 +522,41 @@ async function handleApproval(code, language, suggested) {
     vscode.window.showInformationMessage(`승인됨 ✅ → ${targetRel} 저장 완료`);
     const doc = await vscode.workspace.openTextDocument(fileUri);
     await vscode.window.showTextDocument(doc);
+}
+/* --- 활성 에디터 전체 덮어쓰기 --- */
+async function overwriteActiveEditor(code) {
+    const editor = vscode.window.activeTextEditor;
+    if (!editor) {
+        vscode.window.showErrorMessage("활성 텍스트 에디터가 없습니다.");
+        return null;
+    }
+    const doc = editor.document;
+    if (doc.isClosed) {
+        vscode.window.showErrorMessage("활성 문서를 열 수 없습니다.");
+        return null;
+    }
+    const lastLine = doc.lineAt(Math.max(0, doc.lineCount - 1));
+    const fullRange = new vscode.Range(new vscode.Position(0, 0), lastLine.range.end);
+    await editor.edit((eb) => eb.replace(fullRange, code));
+    await doc.save(); // 필요 시 자동 저장
+    return doc.uri;
+}
+/* --- 커서 위치 삽입 --- */
+async function insertAtCursor(code) {
+    const editor = vscode.window.activeTextEditor;
+    if (!editor) {
+        vscode.window.showErrorMessage("활성 텍스트 에디터가 없습니다.");
+        return null;
+    }
+    const doc = editor.document;
+    if (doc.isClosed) {
+        vscode.window.showErrorMessage("활성 문서를 열 수 없습니다.");
+        return null;
+    }
+    const pos = editor.selection.active;
+    await editor.edit((eb) => eb.insert(pos, code));
+    // 저장은 사용자가 직접 (Undo/Redo를 고려)
+    return doc.uri;
 }
 /* ---------- Fs utils ---------- */
 function guessExtension(language) {
