@@ -63,27 +63,29 @@ function wireMessages(webview: vscode.Webview) {
           const { code = "", language = "plaintext", filename = null, score = null, severity = null } = msg || {};
 
           // RED 게이트: 확인문자 요구
-          if (severity === "red") {
-            const input = await vscode.window.showInputBox({
-              prompt: `고위험(${score})입니다. 계속하려면 'CONFIRM'을 입력하세요.`,
-              validateInput: v => (v === "CONFIRM" ? null : "CONFIRM 을 입력해야 합니다.")
-            });
-            if (input !== "CONFIRM") return;
-          }
+        if (severity === "red") {
+          const input = await vscode.window.showInputBox({
+            prompt: `High risk (${score}). Type 'CONFIRM' to continue.`,
+            validateInput: v => (v === "CONFIRM" ? null : "You must type CONFIRM to proceed.")
+          });
+          if (input !== "CONFIRM") return;
+        }
+
 
           await handleApproval(code, language, filename);
           break;
         }
 
         case "reject": {
-          vscode.window.showWarningMessage("거절되었습니다(저장/실행 안 함)");
+          vscode.window.showWarningMessage("Rejected (not saved or executed).");
           break;
         }
 
         case "details": {
-          vscode.window.showInformationMessage("자세히 보기: 사유는 카드에 표시됩니다.");
+          vscode.window.showInformationMessage("View details: the reason is shown on the card.");
           break;
         }
+
 
         case "ask": {
           const { endpoint, model, wF, wR, wD } = getCfg();
@@ -685,11 +687,11 @@ return `<!doctype html>
     <div class="chat-header">AI Approval Agent</div>
     <div class="chat-body" id="chat">
       <div class="msg bot">
-        무엇을 도와드릴까요? “코드 생성” 요청을 하면, 생성된 코드에 대해 승인/거절을 선택할 수 있어요.
+        How can I help? If you request "code generation," you can choose to approve or reject the generated code.
       </div>
     </div>
     <form id="composer">
-      <input id="prompt" type="text" placeholder="예) express 서버 초기 코드 만들어줘" />
+      <input id="prompt" type="text" placeholder="Ex) Generate starter code for an Express server." />
       <button type="submit">Send</button>
     </form>
   </section>
