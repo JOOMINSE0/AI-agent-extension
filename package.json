@@ -81,13 +81,16 @@
     }
   },
   "scripts": {
-    "watch": "tsc -w -p ./",
-    "compile": "tsc -p ./"
+    "compile": "tsc -p .",
+    "watch": "tsc -w -p .",
+    "build": "npm run compile",
+    "clean": "rimraf out"
   },
   "devDependencies": {
     "@types/node": "^18.0.0",
     "@types/vscode": "^1.80.0",
-    "typescript": "^5.3.0"
+    "typescript": "^5.3.0",
+    "rimraf": "^5.0.0"
   },
   "extensionKind": ["workspace"]
 }

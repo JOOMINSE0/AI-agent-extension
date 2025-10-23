@@ -38,9 +38,9 @@ exports.deactivate = deactivate;
 // src/extension.ts
 const vscode = __importStar(require("vscode"));
 /**
- * AI Approval Agent (FRD 2단 가중치 반영판)
- * - Ollama 스트리밍
- * - 휴리스틱 + LLM 자가평가(JSON: function_change/resource_usage/security_dependency) 융합
+ * AI Approval Agent (CRAI 식 적용 + 정적 분석 기반 SF/SR/SD 산출)
+ * - 코드 생성(스트리밍)은 유지(옵션) — 점수 계산에는 관여하지 않음
+ * - 정적 파이프라인 결과(StaticMetrics) → SF/SR/SD 스코어링 → CRAI 식(2)
  * - 승인 게이트: 위험 명령 차단, RED 확인문자 입력
  * - 승인 시 적용 위치 선택: 현재 파일 덮어쓰기 / 커서에 삽입 / 새 파일 저장
  */
@@ -73,14 +73,13 @@ class ApprovalViewProvider {
 function getCfg() {
     const cfg = vscode.workspace.getConfiguration();
     return {
+        // 코드 생성(스트리밍)용 Ollama (점수 계산엔 사용 안 함)
         endpoint: (cfg.get("aiApproval.ollama.endpoint") || "http://210.110.103.64:11434").replace(/\/$/, ""),
         model: cfg.get("aiApproval.ollama.model") || "llama3.1:8b",
         // 최상위 FRD 가중치 (합 1 권장)
         wF: cfg.get("aiApproval.weights.functionality") ?? 0.40,
         wR: cfg.get("aiApproval.weights.resource") ?? 0.30,
-        wD: cfg.get("aiApproval.weights.dependency") ?? 0.30,
-        // 휴리스틱 vs LLM 융합 비율
-        alpha: cfg.get("aiApproval.fusion.alpha") ?? 0.60
+        wD: cfg.get("aiApproval.weights.dependency") ?? 0.30
     };
 }
 /* ---------- Webview messaging ---------- */
@@ -103,7 +102,7 @@ function wireMessages(webview) {
                     break;
                 }
                 case "reject": {
-                    vscode.window.showWarningMessage("거절되었습니다 ❌ (저장/실행 안 함)");
+                    vscode.window.showWarningMessage("거절되었습니다(저장/실행 안 함)");
                     break;
                 }
                 case "details": {
@@ -111,53 +110,50 @@ function wireMessages(webview) {
                     break;
                 }
                 case "ask": {
-                    const { endpoint, model, wF, wR, wD, alpha } = getCfg();
+                    const { endpoint, model, wF, wR, wD } = getCfg();
                     try {
-                        // 1) 스트리밍 + 전체 텍스트 수집
+                        // 1) (옵션) 코드 생성 스트리밍 — 점수와 무관, UI 제공용
                         const fullText = await chatWithOllamaAndReturn(endpoint, model, msg.text, (delta) => {
                             webview.postMessage({ type: "delta", text: delta });
                         });
-                        // 2) 사용자 프롬프트 포함 조합 (위험 의도 반영)
+                        // 2) 사용자 프롬프트 포함 조합 (UI용 텍스트)
                         const combined = `USER:\n${msg.text}\n\nASSISTANT:\n${fullText}`;
                         // 3) 코드블록 추출 + 파일명 힌트
                         const snippet = extractLastCodeBlockTS(fullText);
-                        const suggested = detectSuggestedFileName(fullText, snippet?.language ?? "plaintext");
-                        // 4) 휴리스틱 → 신호(F/R/D) → 차원 점수
-                        const heur = analyzeGeneratedText(combined, snippet?.code ?? "", suggested);
-                        // 5) LLM 자가평가(JSON) — 키 이름 스펙 일치
-                        const llm = await llmSelfJudgeJSON(endpoint, model, combined, snippet?.code ?? "");
-                        // 6) 융합 (휴리스틱 60% + LLM 40% 기본)
-                        const fusedVector = fuseVector(heur.vector, llm ? [llm.function_change, llm.resource_usage, llm.security_dependency] : null, alpha);
-                        // 7) 최종 점수 (상위 가중치 적용) — 0.0~10.0 스케일
+                        const code = snippet?.code ?? "";
+                        const language = snippet?.language ?? "plaintext";
+                        const suggested = detectSuggestedFileName(fullText, language);
+                        // 4) 정적 파이프라인 실행 → StaticMetrics
+                        const metrics = await runStaticPipeline(code, suggested, language);
+                        // 5) 정적 분석 결과 → 신호(F/R/D) → 차원 점수
+                        const heur = analyzeFromStaticMetrics(metrics, suggested);
+                        // 6) 최종 CRAI (식 2) 계산 — 0.0~10.0 스케일
+                        const fusedVector = heur.vector; // ★ LLM 융합 없음
                         const scored = scoreFromVector(fusedVector, { wF, wR, wD });
-                        // 참고치(설명력)
-                        const llmVector = llm ? [llm.function_change, llm.resource_usage, llm.security_dependency] : heur.vector;
-                        const llmOnly = scoreFromVector(llmVector, { wF, wR, wD });
-                        const heurOnly = scoreFromVector(heur.vector, { wF, wR, wD });
-                        // 8) 웹뷰로 전달 (신호 테이블 + 사유 포함)
+                        // 7) 웹뷰로 전달 (CRAI 구성요소/신호 테이블 포함)
                         webview.postMessage({
                             type: "analysis",
                             vector: fusedVector,
                             score: scored.score, // 0.0~10.0
                             severity: scored.severity, // green/yellow/orange/red
+                            level: scored.level,
                             weights: scored.weights,
                             suggestedFilename: suggested || null,
-                            language: snippet?.language ?? "plaintext",
-                            code: snippet?.code ?? "",
-                            reasons: llm?.reasons || {},
-                            signalTable: heur.signalTable, // 휴리스틱 추정 신호값
+                            language,
+                            code,
+                            reasons: {},
+                            crai_components: scored.crai_components,
+                            signalTable: heur.signalTable,
                             breakdown: {
-                                fused: { vector: fusedVector, ...scored },
-                                llmOnly: { vector: llmVector, ...llmOnly },
-                                heurOnly: { vector: heur.vector, ...heurOnly }
+                                heurOnly: { vector: heur.vector, ...scored }
                             }
                         });
                         webview.postMessage({ type: "done" });
                     }
                     catch (e) {
                         const detail = e?.message || String(e);
-                        console.error("Ollama 호출 실패:", e);
-                        vscode.window.showErrorMessage(`Ollama 호출 실패: ${detail}`);
+                        console.error("분석 파이프라인 실패:", e);
+                        vscode.window.showErrorMessage(`분석 실패: ${detail}`);
                         webview.postMessage({ type: "error", message: detail });
                     }
                     break;
@@ -177,7 +173,7 @@ async function chatWithOllamaAndReturn(endpoint, model, userText, onDelta) {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const fetchFn = globalThis.fetch;
     if (!fetchFn)
-        throw new Error("fetch가 지원되지 않는 런타임입니다.");
+        return ""; // 네트워크 불가 환경에서도 UI가 깨지지 않도록
     const res = await fetchFn(`${endpoint}/api/chat`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -191,7 +187,7 @@ async function chatWithOllamaAndReturn(endpoint, model, userText, onDelta) {
         })
     });
     if (!res.ok || !res.body)
-        throw new Error(`HTTP ${res.status}`);
+        return "";
     const reader = res.body.getReader();
     const decoder = new TextDecoder("utf-8");
     let buf = "";
@@ -222,65 +218,48 @@ async function chatWithOllamaAndReturn(endpoint, model, userText, onDelta) {
     }
     return full;
 }
-async function llmSelfJudgeJSON(endpoint, model, fullText, code) {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const fetchFn = globalThis.fetch;
-    const res = await fetchFn(`${endpoint}/api/chat`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-            model,
-            stream: false,
-            messages: [
-                {
-                    role: "system",
-                    content: `You are a code change risk auditor. Return STRICT JSON only. No prose.
-Keys and ranges:
-{
- "function_change": 0..1,
- "resource_usage": 0..1,
- "security_dependency": 0..1,
- "reasons": {
-   "function_change": "short reason",
-   "resource_usage": "short reason",
-   "security_dependency": "short reason"
- }
-}
-Interpretation:
-- function_change: public API ratio↑, core/domain change, large diff, schema change
-- resource_usage: heavy loops/parallelism, memory growth, external calls/cost
-- security_dependency: new/vulnerable deps, dangerous APIs (eval/exec), credentials, SQL risks`
-                },
-                {
-                    role: "user",
-                    content: `Analyze this assistant answer & code.
-
-# ASSISTANT_TEXT
-${fullText}
-
-# CODE
-\`\`\`
-${code}
-\`\`\`
-
-Return JSON ONLY.`
-                }
-            ]
-        })
-    });
-    if (!res.ok)
-        return null;
-    const data = await res.json();
-    const text = data?.message?.content?.trim?.() ?? "";
-    try {
-        return JSON.parse(text);
+/* ---------- 정적 파이프라인 실행 (스텁: 실제 도구로 대체하세요) ---------- */
+async function runStaticPipeline(code, filename, language) {
+    // TODO: 여기를 실제 분석기로 교체
+    // - Git diff/AST: ts-morph, tree-sitter, babel parser 등
+    // - SCA: osv-scanner/Dependency-Check 결과 파싱
+    // - 빌드 아티팩트/메타데이터 결합
+    // 지금은 안전한 기본값 + 간단한 스케일러만 제공
+    const lineCount = (code.match(/\n/g) || []).length + 1;
+    const metrics = {
+        apiChanges: 0,
+        totalApis: Math.max(1, (code.match(/\bexport\s+(function|class|interface)\b/g) || []).length || 5),
+        coreTouched: !!filename && /(\/|^)(core|service|domain)\//i.test(filename),
+        diffChangedLines: Math.min(200, Math.round(lineCount * 0.2)),
+        totalLines: Math.max(1, lineCount),
+        schemaChanged: /\b(ALTER\s+TABLE|CREATE\s+TABLE|DROP\s+TABLE|MIGRATION)\b/i.test(code),
+        bigO: "unknown",
+        memAllocs: (code.match(/\bnew\s+[A-Z][A-Za-z0-9_]*\b/g) || []).length
+            + (code.match(/\bBuffer\.alloc|new\s+Array\b/gi) || []).length,
+        externalCalls: (code.match(/\b(fetch|axios|request|http\.|https\.|db\.|query|sequelize|prisma|jdbc|mongo|redis)\b/gi) || []).length,
+        cveSeverity01: 0.0,
+        libReputation01: 0.65,
+        licenseMismatch: false,
+        permRisk01: (/\bfs\.(read|write|unlink|chmod|chown|readdir)\b/i.test(code) ? 0.3 : 0)
+            + (/\bprocess\.env\b|\bcredential|\bpassword\b/i.test(code) ? 0.3 : 0)
+            + (/\bchild_process|exec\(|spawn\(|popen\(|system\(/i.test(code) ? 0.4 : 0)
+    };
+    // 간단 Big-O 근사
+    if (/\bfor\s*\(.*\)\s*{[^}]*for\s*\(/is.test(code) || /\bwhile\s*\(.*\)\s*{[^}]*while\s*\(/is.test(code)) {
+        metrics.bigO = "O(n^2)";
     }
-    catch {
-        return null;
+    else if (/\bfor\s*\(/.test(code) || /\bwhile\s*\(/.test(code)) {
+        metrics.bigO = "O(n)";
     }
+    else {
+        metrics.bigO = "unknown";
+    }
+    metrics.permRisk01 = clamp01(metrics.permRisk01);
+    metrics.cveSeverity01 = clamp01(metrics.cveSeverity01);
+    metrics.libReputation01 = clamp01(metrics.libReputation01);
+    return metrics;
 }
 /* ---------- Weights (신호/차원) ---------- */
-// 차원 내부 신호 가중치 (합 1)
 const WF = { api: 0.40, core: 0.25, diff: 0.20, schema: 0.15 };
 const WR = { bigO: 0.40, mem: 0.30, ext: 0.20 };
 const WD = { cve: 0.35, rep: 0.30, lic: 0.20, perm: 0.15 };
@@ -291,125 +270,70 @@ function mapBigOTo01(bigO) {
     };
     return lut[bigO] ?? 0.50;
 }
-/* ---- 차원 점수 계산 ---- */
-function computeFSignals(s) {
-    const v = s.api * WF.api + (s.core ? 1 : 0) * WF.core + s.diff * WF.diff + (s.schema ? 1 : 0) * WF.schema;
+const sat01 = (x, k) => clamp01(1 - Math.exp(-k * Math.max(0, x))); // 포화형 스케일러
+/* ---- 차원 점수 계산 (정적 메트릭 기반) ---- */
+function computeFSignalsFromMetrics(m) {
+    const apiRatio = clamp01(m.apiChanges / Math.max(1, m.totalApis));
+    const diffRatio = clamp01(m.diffChangedLines / Math.max(1, m.totalLines));
+    const v = apiRatio * WF.api + (m.coreTouched ? 1 : 0) * WF.core + diffRatio * WF.diff + (m.schemaChanged ? 1 : 0) * WF.schema;
     return clamp01(v);
 }
-function computeRSignals(s) {
-    const v = s.bigO * WR.bigO + s.mem * WR.mem + s.ext * WR.ext;
+function computeRSignalsFromMetrics(m) {
+    const bigO = mapBigOTo01(m.bigO);
+    const mem = clamp01(sat01(m.memAllocs, 0.06)); // ~50개에서 0.95 접근
+    const ext = clamp01(sat01(m.externalCalls, 0.05)); // ~40개에서 0.86
+    const v = bigO * WR.bigO + mem * WR.mem + ext * WR.ext;
     return clamp01(v);
 }
-function computeDSignals(s) {
-    const v = s.cve * WD.cve + (1 - s.rep) * WD.rep + (s.lic ? 1 : 0) * WD.lic + s.perm * WD.perm;
+function computeDSignalsFromMetrics(m) {
+    const v = m.cveSeverity01 * WD.cve + (1 - m.libReputation01) * WD.rep + (m.licenseMismatch ? 1 : 0) * WD.lic + m.permRisk01 * WD.perm;
     return clamp01(v);
 }
-/* ---------- Heuristic analysis (신호 추정 + 차원 점수) ---------- */
-function analyzeGeneratedText(fullText, code, filename) {
-    const whole = (fullText + "\n" + code);
-    // ===== F 신호 추정 =====
-    const apiChangedRatio = estimateChangedApiRatio(whole); // 0..1
-    const coreModule = isCoreModule(filename) || /(?:core|domain|service)\//i.test(whole);
-    const diffRatio = estimateDiffLineRatio(whole); // 0..1 (간이)
-    const schemaChanged = /\b(ALTER\s+TABLE|CREATE\s+TABLE|DROP\s+TABLE|ALTER\s+COLUMN|ADD\s+COLUMN|MIGRATION)\b/i.test(whole);
-    const F = computeFSignals({ api: apiChangedRatio, core: coreModule, diff: diffRatio, schema: schemaChanged });
-    // ===== R 신호 추정 =====
-    const bigO = inferBigOFromText(whole); // 0..1
-    const memInc = estimateMemIncrease(whole); // 0..1
-    const extCalls = estimateExternalCallImpact(whole); // 0..1
-    const R = computeRSignals({ bigO, mem: memInc, ext: extCalls });
-    // ===== D 신호 추정 =====
-    const cveSeverity = /\bCVE-\d{4}-\d+\b/i.test(whole) ? 0.8 : 0.0; // 텍스트에 CVE 언급시 가중
-    const libRep = estimateLibraryReputation(whole); // 0..1 (높을수록 안전)
-    const licenseMismatch = /LICENSE|SPDX|GPL\b.*\bMIT\b|license\s+conflict/i.test(whole) ? true : false;
-    const sensitivePerm = estimateSensitivePermission(whole); // 0..1
-    const D = computeDSignals({ cve: cveSeverity, rep: libRep, lic: licenseMismatch, perm: sensitivePerm });
+/* ---------- Static metrics → FRD 벡터 ---------- */
+function analyzeFromStaticMetrics(metrics, filename) {
+    const F = computeFSignalsFromMetrics(metrics);
+    const R = computeRSignalsFromMetrics(metrics);
+    const D = computeDSignalsFromMetrics(metrics);
     const vector = [F, R, D];
-    // 웹뷰용 신호 테이블(값만 전달)
+    // 웹뷰용 신호 테이블
     const signalTable = {
-        F: { changedApiRatio: apiChangedRatio, coreModuleModified: coreModule ? 1 : 0, diffLineRatio: diffRatio, schemaChanged: schemaChanged ? 1 : 0 },
-        R: { timeComplexity: bigO, memIncreaseRatio: memInc, externalCallNorm: extCalls },
-        D: { cveSeverity, libReputation: libRep, licenseMismatch: licenseMismatch ? 1 : 0, sensitivePerm: sensitivePerm }
+        F: { apiRatio: clamp01(metrics.apiChanges / Math.max(1, metrics.totalApis)),
+            coreModuleModified: metrics.coreTouched ? 1 : 0,
+            diffLineRatio: clamp01(metrics.diffChangedLines / Math.max(1, metrics.totalLines)),
+            schemaChanged: metrics.schemaChanged ? 1 : 0 },
+        R: { timeComplexity: mapBigOTo01(metrics.bigO),
+            memIncreaseNorm: clamp01(sat01(metrics.memAllocs, 0.06)),
+            externalCallNorm: clamp01(sat01(metrics.externalCalls, 0.05)) },
+        D: { cveSeverity: metrics.cveSeverity01,
+            libReputation: metrics.libReputation01,
+            licenseMismatch: metrics.licenseMismatch ? 1 : 0,
+            sensitivePerm: metrics.permRisk01 }
     };
-    return { vector, code, filename, signalTable };
+    return { vector, filename, signalTable };
 }
-/* ---------- 간이 신호 추정 유틸 (AST/프로파일링 없이 텍스트/정규식으로 근사) ---------- */
-function estimateChangedApiRatio(text) {
-    // export/public 함수 시그니처 변화를 간이 추정 (API 키워드 수의 변화 힌트)
-    const addedApis = (text.match(/\bexport\s+(?:function|class|interface)\b/gi) || []).length
-        + (text.match(/\bpublic\s+(?:class|interface|function|method)\b/gi) || []).length;
-    // 상수 10 기준으로 비율 근사 (실제 구현은 AST 비교 권장)
-    return clamp01(addedApis / 10);
-}
-function estimateDiffLineRatio(text) {
-    // ```diff 혹은 +/− 라인 패턴 근사
-    const plus = (text.match(/^\+\s?.+/gm) || []).length;
-    const minus = (text.match(/^-\s?.+/gm) || []).length;
-    const changed = plus + minus;
-    return clamp01(changed / 500); // 500라인 기준 스케일
-}
-function inferBigOFromText(text) {
-    if (/\bfor\s*\(.*\)\s*{[^}]*for\s*\(/is.test(text) || /\bO\(n\^?2\)/i.test(text))
-        return mapBigOTo01("O(n^2)");
-    if (/\bwhile\s*\(.*\)\s*{[^}]*while\s*\(/is.test(text))
-        return mapBigOTo01("O(n^2)");
-    if (/\bfor\s*\(/i.test(text) && /\blog\b/i.test(text))
-        return mapBigOTo01("O(n log n)");
-    if (/\bfor\s*\(/i.test(text) || /\bwhile\s*\(/i.test(text))
-        return mapBigOTo01("O(n)");
-    return mapBigOTo01("unknown");
-}
-function estimateMemIncrease(text) {
-    const allocs = (text.match(/\bnew\s+[A-Z][A-Za-z0-9_]*\b/g) || []).length
-        + (text.match(/\bmalloc|calloc|Array\(|Buffer\.alloc|new\s+Array\b/gi) || []).length;
-    return clamp01(allocs / 50);
-}
-function estimateExternalCallImpact(text) {
-    const calls = (text.match(/\b(fetch|axios|request|http\.|https\.|db\.|query|sequelize|prisma|jdbc|mongo|redis)\b/gi) || []).length;
-    return clamp01(calls / 40);
-}
-function estimateLibraryReputation(text) {
-    // 유명 프레임워크 키워드가 있으면 rep↑, 생소한 패키지 다량이면 rep↓ (아주 거친 근사)
-    const wellKnown = /react|express|django|spring|numpy|pandas|lodash|fastapi|flask|typeorm|sequelize/i.test(text);
-    const deps = Array.from(text.matchAll(/(?:import\s+([a-z0-9_.\-@/]+)|require\(['"]([a-z0-9_.\-@/]+)['"]\))/ig)).length;
-    if (wellKnown && deps < 10)
-        return 0.85;
-    if (!wellKnown && deps >= 10)
-        return 0.40;
-    return 0.65;
-}
-function estimateSensitivePermission(text) {
-    let v = 0;
-    if (/\bfs\.(read|write|unlink|chmod|chown|readdir)\b/i.test(text))
-        v += 0.3;
-    if (/\bprocess\.env\b|\bcredential|\bpassword\b/i.test(text))
-        v += 0.3;
-    if (/\bchild_process|exec\(|spawn\(|popen\(|system\(/i.test(text))
-        v += 0.4;
-    return clamp01(v);
-}
-function isCoreModule(path) {
-    if (!path)
-        return false;
-    return /(\/|^)(core|domain|service|app|server|main|index)\.[a-z0-9]+$/i.test(path)
-        || /(\/|^)(core|domain|service)\//i.test(path);
-}
-/* ---------- Fuse Heuristic + LLM ---------- */
-function fuseVector(heur, // [F,R,D]
-llm, alpha) {
-    if (!llm)
-        return heur;
-    return [
-        alpha * heur[0] + (1 - alpha) * llm[0],
-        alpha * heur[1] + (1 - alpha) * llm[1],
-        alpha * heur[2] + (1 - alpha) * llm[2]
-    ];
-}
-/* ---------- Final scoring (0.0~10.0) ---------- */
+/* ---------- Final scoring: CRAI 식(2) 적용 (0.0~10.0) ---------- */
+/**
+ * CRAI = min(10, (1-α)B + αC)
+ *  B = 10 (wF*SF + wR*SR + wD*SD)
+ *  C = min(10, 10 [ SD + (1-SD) ( (wF/(wF+wR))SF + (wR/(wF+wR))SR ) ])
+ *  ρ = SD / (SF + SR + SD + 1e-6)
+ *  α = s(SD; 0.4, 0.7) * (0.5 + 0.5ρ)
+ *  s(x;a,b) = 0 (x≤a), 1 (x≥b), 그 사이는 smoothstep: t^2(3-2t), t=(x-a)/(b-a)
+ */
 function scoreFromVector(v, top) {
     const cfg = top ?? { wF: 0.40, wR: 0.30, wD: 0.30 };
-    const raw = v[0] * cfg.wF + v[1] * cfg.wR + v[2] * cfg.wD; // 0..1
-    const score = Math.round(raw * 10 * 10) / 10; // 소수 1자리 (예: 7.3)
+    const SF = clamp01(v[0]);
+    const SR = clamp01(v[1]);
+    const SD = clamp01(v[2]);
+    const B = 10 * (cfg.wF * SF + cfg.wR * SR + cfg.wD * SD);
+    const wrSum = cfg.wF + cfg.wR;
+    const mixFR = wrSum > 0 ? (cfg.wF / wrSum) * SF + (cfg.wR / wrSum) * SR : 0;
+    const C = Math.min(10, 10 * (SD + (1 - SD) * mixFR));
+    const rho = SD / (SF + SR + SD + 1e-6);
+    const s = smoothstep(SD, 0.4, 0.7);
+    const alpha = s * (0.5 + 0.5 * rho);
+    const craiRaw = (1 - alpha) * B + alpha * C;
+    const score = Math.min(10, craiRaw);
     let severity = "green";
     let level = "LOW";
     let action = "Quick scan sufficient";
@@ -428,7 +352,19 @@ function scoreFromVector(v, top) {
         level = "MEDIUM";
         action = "Standard review process";
     }
-    return { score, severity, level, action, weights: cfg };
+    return {
+        score, severity, level, action, weights: cfg,
+        crai_components: { B, C, alpha, rho, s, SF, SR, SD, mixFR }
+    };
+}
+/* ----- smoothstep 스무딩 함수 (s(x; a, b)) ----- */
+function smoothstep(x, a, b) {
+    if (x <= a)
+        return 0;
+    if (x >= b)
+        return 1;
+    const t = (x - a) / (b - a);
+    return t * t * (3 - 2 * t);
 }
 /* ---------- Filename hint ---------- */
 function detectSuggestedFileName(fullText, _fallbackLang) {
@@ -444,9 +380,9 @@ function detectSuggestedFileName(fullText, _fallbackLang) {
         return null;
     const ext = extMatch[1];
     if (!/[A-Za-z]/.test(ext))
-        return null; // 확장자에 영문 1자 이상
+        return null;
     if (/^\d+(\.\d+)+$/.test(last))
-        return null; // 순수 버전번호 문자열 제외
+        return null;
     if (last.includes(".."))
         return null;
     return last.replace(/^\/+/, "");
@@ -459,7 +395,6 @@ async function handleApproval(code, language, suggested) {
         vscode.window.showErrorMessage("워크스페이스가 열려 있지 않습니다.");
         return;
     }
-    // 터미널 명령 감지 + 위험 명령 차단
     const shellCmdPattern = /^(npm|yarn|pip|pip3|pnpm|apt|apt-get|brew|git|chmod|chown|sudo|rm|mv|cp|mkdir|rmdir|systemctl|service|curl|bash)\b/i;
     const firstLine = (code || "").trim().split(/\r?\n/)[0] || "";
     const looksLikeShell = language === "bash" || language === "sh" || shellCmdPattern.test(firstLine);
@@ -491,7 +426,6 @@ async function handleApproval(code, language, suggested) {
         vscode.window.showInformationMessage(`터미널에서 ${lines.length}개 명령을 실행했습니다.`);
         return;
     }
-    // === 코드 적용 위치 선택 ===
     const choice = await vscode.window.showQuickPick([
         { label: "Overwrite current file", description: "활성 에디터의 전체 내용을 교체" },
         { label: "Insert at cursor", description: "활성 에디터의 현재 커서 위치에 삽입" },
@@ -511,7 +445,6 @@ async function handleApproval(code, language, suggested) {
             vscode.window.showInformationMessage(`현재 파일 커서 위치에 삽입했습니다: ${uri.fsPath} (저장은 Ctrl/Cmd+S)`);
         return;
     }
-    // --- 새 파일 저장 (기존 로직) ---
     const root = vscode.workspace.workspaceFolders[0].uri;
     const ext = guessExtension(language);
     const targetRel = sanitizeRelativePath(suggested) || (await nextAutoName(root, ext));
@@ -519,7 +452,7 @@ async function handleApproval(code, language, suggested) {
     const fileUri = vscode.Uri.joinPath(root, targetRel);
     const enc = new TextEncoder();
     await vscode.workspace.fs.writeFile(fileUri, enc.encode(code));
-    vscode.window.showInformationMessage(`승인됨 ✅ → ${targetRel} 저장 완료`);
+    vscode.window.showInformationMessage(`승인됨 → ${targetRel} 저장 완료`);
     const doc = await vscode.workspace.openTextDocument(fileUri);
     await vscode.window.showTextDocument(doc);
 }
@@ -538,7 +471,7 @@ async function overwriteActiveEditor(code) {
     const lastLine = doc.lineAt(Math.max(0, doc.lineCount - 1));
     const fullRange = new vscode.Range(new vscode.Position(0, 0), lastLine.range.end);
     await editor.edit((eb) => eb.replace(fullRange, code));
-    await doc.save(); // 필요 시 자동 저장
+    await doc.save();
     return doc.uri;
 }
 /* --- 커서 위치 삽입 --- */
@@ -555,7 +488,6 @@ async function insertAtCursor(code) {
     }
     const pos = editor.selection.active;
     await editor.edit((eb) => eb.insert(pos, code));
-    // 저장은 사용자가 직접 (Undo/Redo를 고려)
     return doc.uri;
 }
 /* ---------- Fs utils ---------- */
@@ -744,7 +676,7 @@ function extractLastCodeBlockTS(text) {
 function deactivate() { }
 /* ----------------------------------------------------------------------
  * 참고: package.json의 contributes.configuration에 아래 키를 등록하면
- * 가중치/융합 비율을 UI에서 조절할 수 있어요.
+ * 가중치/모델 엔드포인트를 UI에서 조절할 수 있어요.
  *
 "contributes": {
   "configuration": {
@@ -754,8 +686,7 @@ function deactivate() { }
       "aiApproval.ollama.model":    { "type":"string", "default":"llama3.1:8b" },
       "aiApproval.weights.functionality": { "type":"number", "default":0.40, "minimum":0, "maximum":1 },
       "aiApproval.weights.resource":      { "type":"number", "default":0.30, "minimum":0, "maximum":1 },
-      "aiApproval.weights.dependency":    { "type":"number", "default":0.30, "minimum":0, "maximum":1 },
-      "aiApproval.fusion.alpha":          { "type":"number", "default":0.60, "minimum":0, "maximum":1 }
+      "aiApproval.weights.dependency":    { "type":"number", "default":0.30, "minimum":0, "maximum":1 }
     }
   }
 }
