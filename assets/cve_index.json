@@ -1,0 +1,26 @@
+[
+  {
+    "id": "CVE-2023-0001",
+    "summary": "Plaintext password storage in MySQL user table.",
+    "tags": ["mysql", "password", "plaintext", "sql"],
+    "cvss": 7.8
+  },
+  {
+    "id": "CVE-2023-0456",
+    "summary": "Command injection from unsanitized shell input.",
+    "tags": ["command", "injection", "shell", "unsanitized"],
+    "cvss": 9.1
+  },
+  {
+    "id": "CVE-2022-1234",
+    "summary": "Improper input validation leading to SQL injection.",
+    "tags": ["sql", "injection", "sanitization"],
+    "cvss": 8.2
+  },
+  {
+    "id": "CVE-2021-9999",
+    "summary": "Use of vulnerable package vulnerable_pkg_2023 causing RCE.",
+    "tags": ["package","vulnerable_pkg_2023","rce"],
+    "cvss": 9.8
+  }
+]

@@ -7,6 +7,13 @@
   "engines": { "vscode": "^1.80.0" },
   "categories": ["Other"],
   "main": "./out/extension.js",
+  "files": [
+    "out/**",
+    "assets/**",
+    "media/**",
+    "package.json",
+    "README.md"
+  ],
   "activationEvents": [
     "onView:aiApprovalView",
     "onCommand:ai-approval-agent.showPanel"

@@ -218,25 +218,84 @@ async function chatWithOllamaAndReturn(endpoint, model, userText, onDelta) {
     }
     return full;
 }
-/* ---------- 정적 파이프라인 실행 (스텁: 실제 도구로 대체하세요) ---------- */
+const SIMPLE_CVE_MAP = [
+    // 커맨드 인젝션: os.system / subprocess / child_process.exec 등
+    {
+        id: "CVE-MOCK-CMD-INJECTION",
+        tags: ["command", "injection", "shell"],
+        severity: 0.95,
+        regex: /\b(os\.system|subprocess\.(Popen|call|run)|child_process\.(exec|spawn)|Runtime\.getRuntime\(\)\.exec|system\()/i,
+        permsBoost: 0.35
+    },
+    // SQL 인젝션: 사용자 입력이 문자열 결합/format으로 SQL 구성
+    {
+        id: "CVE-MOCK-SQLI-CONCAT",
+        tags: ["sql", "injection", "concat"],
+        severity: 0.9,
+        regex: /\b(SELECT|INSERT|UPDATE|DELETE)\b[\s\S]{0,200}\b(user|username|name|pwd|password)\b[\s\S]{0,40}("|'|`|\)|\})?\s*(\+|%s|format\(|f")/i
+    },
+    // 평문 비밀번호 저장/민감 정보 테이블 접근
+    {
+        id: "CVE-MOCK-PLAINTEXT-PWD",
+        tags: ["mysql", "password", "plaintext"],
+        severity: 0.85,
+        regex: /\b(mysql\.user|INSERT\s+INTO\s+mysql\.user|password\s*[:=]\s*["'`][^"'`]{1,64}["'`])/i
+    },
+    // 취약 라이브러리 임포트(예시: vulnerable_pkg_2023)
+    {
+        id: "CVE-MOCK-VULN-PKG",
+        tags: ["package", "rce", "vulnerable_pkg_2023"],
+        severity: 0.9,
+        regex: /\b(import|require)\s+.*vulnerable[_-]?pkg[_-]?2023\b/i,
+        libRepFloor: 0.10
+    }
+];
+/* ---------- 유틸 ---------- */
+const clamp01 = (x) => Math.max(0, Math.min(1, x));
+function mapBigOTo01(bigO) {
+    const lut = {
+        "O(1)": 0.05, "O(log n)": 0.15, "O(n)": 0.20, "O(n log n)": 0.35, "O(n^2)": 0.70, "O(n^3)": 0.90, "unknown": 0.50
+    };
+    return lut[bigO] ?? 0.50;
+}
+const sat01 = (x, k) => clamp01(1 - Math.exp(-k * Math.max(0, x))); // 포화형 스케일러
+/* ---------- 경량 CVE 매칭: 코드 문자열에서 규칙 검색 ---------- */
+function evaluateCveFromCode(code) {
+    const matched = [];
+    let sevAgg = 0; // 다중 규칙을 결합: 1 - Π(1 - s_i)
+    let libRepFloor = 1; // 낮을수록 안좋음(최종적으로 Math.min에 사용)
+    let permBoost = 0; // 권한/명령 위험 보정치 누적
+    for (const rule of SIMPLE_CVE_MAP) {
+        if (rule.regex.test(code)) {
+            matched.push(rule.id);
+            sevAgg = 1 - (1 - sevAgg) * (1 - clamp01(rule.severity));
+            if (typeof rule.libRepFloor === "number") {
+                libRepFloor = Math.min(libRepFloor, clamp01(rule.libRepFloor));
+            }
+            if (typeof rule.permsBoost === "number") {
+                permBoost = clamp01(permBoost + rule.permsBoost);
+            }
+        }
+    }
+    return { severity01: clamp01(sevAgg), libRepFloor, permBoost, matched };
+}
+/* ---------- 정적 파이프라인 실행 ---------- */
 async function runStaticPipeline(code, filename, language) {
-    // TODO: 여기를 실제 분석기로 교체
-    // - Git diff/AST: ts-morph, tree-sitter, babel parser 등
-    // - SCA: osv-scanner/Dependency-Check 결과 파싱
-    // - 빌드 아티팩트/메타데이터 결합
-    // 지금은 안전한 기본값 + 간단한 스케일러만 제공
     const lineCount = (code.match(/\n/g) || []).length + 1;
     const metrics = {
+        // --- Functionality 측정치(간단 근사) ---
         apiChanges: 0,
         totalApis: Math.max(1, (code.match(/\bexport\s+(function|class|interface)\b/g) || []).length || 5),
         coreTouched: !!filename && /(\/|^)(core|service|domain)\//i.test(filename),
         diffChangedLines: Math.min(200, Math.round(lineCount * 0.2)),
         totalLines: Math.max(1, lineCount),
         schemaChanged: /\b(ALTER\s+TABLE|CREATE\s+TABLE|DROP\s+TABLE|MIGRATION)\b/i.test(code),
+        // --- Resource 측정치(간단 근사) ---
         bigO: "unknown",
         memAllocs: (code.match(/\bnew\s+[A-Z][A-Za-z0-9_]*\b/g) || []).length
             + (code.match(/\bBuffer\.alloc|new\s+Array\b/gi) || []).length,
         externalCalls: (code.match(/\b(fetch|axios|request|http\.|https\.|db\.|query|sequelize|prisma|jdbc|mongo|redis)\b/gi) || []).length,
+        // --- Dependability 초기값 ---
         cveSeverity01: 0.0,
         libReputation01: 0.65,
         licenseMismatch: false,
@@ -254,23 +313,19 @@ async function runStaticPipeline(code, filename, language) {
     else {
         metrics.bigO = "unknown";
     }
-    metrics.permRisk01 = clamp01(metrics.permRisk01);
-    metrics.cveSeverity01 = clamp01(metrics.cveSeverity01);
-    metrics.libReputation01 = clamp01(metrics.libReputation01);
+    // === (추가) 경량 CVE 매칭 적용 ===
+    const { severity01, libRepFloor, permBoost } = evaluateCveFromCode(code);
+    metrics.cveSeverity01 = clamp01(Math.max(metrics.cveSeverity01, severity01));
+    // 취약 라이브러리 임포트 시 평판 하향(낮을수록 안좋음)
+    metrics.libReputation01 = clamp01(Math.min(metrics.libReputation01, libRepFloor));
+    // 커맨드 인젝션 등으로 인한 권한 위험 보정
+    metrics.permRisk01 = clamp01(metrics.permRisk01 + permBoost);
     return metrics;
 }
 /* ---------- Weights (신호/차원) ---------- */
 const WF = { api: 0.40, core: 0.25, diff: 0.20, schema: 0.15 };
 const WR = { bigO: 0.40, mem: 0.30, ext: 0.20 };
 const WD = { cve: 0.35, rep: 0.30, lic: 0.20, perm: 0.15 };
-const clamp01 = (x) => Math.max(0, Math.min(1, x));
-function mapBigOTo01(bigO) {
-    const lut = {
-        "O(1)": 0.05, "O(log n)": 0.15, "O(n)": 0.20, "O(n log n)": 0.35, "O(n^2)": 0.70, "O(n^3)": 0.90, "unknown": 0.50
-    };
-    return lut[bigO] ?? 0.50;
-}
-const sat01 = (x, k) => clamp01(1 - Math.exp(-k * Math.max(0, x))); // 포화형 스케일러
 /* ---- 차원 점수 계산 (정적 메트릭 기반) ---- */
 function computeFSignalsFromMetrics(m) {
     const apiRatio = clamp01(m.apiChanges / Math.max(1, m.totalApis));
@@ -610,10 +665,6 @@ function getHtml(webview, ctx, nonce) {
       box-sizing: border-box;
     }
 
-    #composer #prompt::placeholder {
-      color: #888;
-    }
-
     #composer button {
       flex: 0 0 auto;
       padding: 8px 14px;
@@ -674,21 +725,4 @@ function extractLastCodeBlockTS(text) {
     return { language: "plaintext", code: last };
 }
 function deactivate() { }
-/* ----------------------------------------------------------------------
- * 참고: package.json의 contributes.configuration에 아래 키를 등록하면
- * 가중치/모델 엔드포인트를 UI에서 조절할 수 있어요.
- *
-"contributes": {
-  "configuration": {
-    "title": "AI Approval Agent",
-    "properties": {
-      "aiApproval.ollama.endpoint": { "type":"string", "default":"http://210.110.103.64:11434" },
-      "aiApproval.ollama.model":    { "type":"string", "default":"llama3.1:8b" },
-      "aiApproval.weights.functionality": { "type":"number", "default":0.40, "minimum":0, "maximum":1 },
-      "aiApproval.weights.resource":      { "type":"number", "default":0.30, "minimum":0, "maximum":1 },
-      "aiApproval.weights.dependency":    { "type":"number", "default":0.30, "minimum":0, "maximum":1 }
-    }
-  }
-}
- * -------------------------------------------------------------------- */
 //# sourceMappingURL=extension.js.map
