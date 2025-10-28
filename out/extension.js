@@ -37,18 +37,30 @@ exports.activate = activate;
 exports.deactivate = deactivate;
 // src/extension.ts
 const vscode = __importStar(require("vscode"));
+const fs = __importStar(require("fs")); // [NEW] 동적 CVE DB 로딩용
+const path = __importStar(require("path")); // [NEW] 동적 CVE DB 로딩용
 /**
  * AI Approval Agent (CRAI 식 적용 + 정적 분석 기반 SF/SR/SD 산출)
- * 추가 구현:
- * 1) CVE 시그니처 "벡터화 + 거리(코사인) 기반" 검색을 정규식 룰과 결합
- * 2) 정밀 리소스 산정:
- *    - Cyclomatic Complexity(CC), 루프 중첩/재귀/분할정복/정렬 힌트
- *    - Buffer/Array/문자열/객체/컬렉션 크기 기반 메모리 바이트 추정
- *    - I/O, 네트워크, DB, 파일, 정규표현식 폭발 위험 신호
- *    - 시간/공간 복잡도 신호를 정규화하여 R(리소스) 차원에 반영
+ *
+ * 교수님 요구사항 반영 핵심:
+ *  - [중요] CVE.org JSON에서 생성된 벡터(DB)를 동적으로 로딩하여
+ *    "가짜/임의"가 아닌 "실제 데이터 기반" 유사도 계산으로 CRAI를 산출.
+ *  - [변경] 고정 vocab(CVE_VOCAB) 삭제. 사전투영 없이 공통키(합집합) 기반 코사인.
+ *  - [Fallback] generated_cve_db.json이 없을 경우, 최소 구동을 위한 내장 시그니처 유지.
  */
+// ─────────────────────────────────────────────────────────────────────────────
+// 0) 확장 활성화
+// ─────────────────────────────────────────────────────────────────────────────
 function activate(context) {
     console.log("AI Approval Agent is now active!");
+    // [NEW] 확장 시작 시 CVE 벡터 DB 로드 (동적 → 없으면 Fallback)
+    DYN_CVE_DB = loadGeneratedCveDb(context);
+    if (DYN_CVE_DB.length) {
+        console.log(`[CVE] Loaded generated DB: ${DYN_CVE_DB.length} signature(s)`);
+    }
+    else {
+        console.warn("[CVE] generated_cve_db.json not found. Using built-in fallback DB.");
+    }
     const provider = new ApprovalViewProvider(context);
     context.subscriptions.push(vscode.window.registerWebviewViewProvider("aiApprovalView", provider, {
         webviewOptions: { retainContextWhenHidden: true }
@@ -57,6 +69,9 @@ function activate(context) {
         vscode.window.showInformationMessage("AI Approval Panel opened!");
     }));
 }
+// ─────────────────────────────────────────────────────────────────────────────
+// 1) Webview Provider
+// ─────────────────────────────────────────────────────────────────────────────
 class ApprovalViewProvider {
     ctx;
     constructor(ctx) {
@@ -131,7 +146,7 @@ function wireMessages(webview) {
                         // 5) 최종 CRAI (식 2) 계산 — 0.0~10.0 스케일
                         const fusedVector = heur.vector;
                         const scored = scoreFromVector(fusedVector, { wF, wR, wD });
-                        // 6) 웹뷰로 전달
+                        // 6) 웹뷰로 전달 (증거 포함)
                         webview.postMessage({
                             type: "analysis",
                             vector: fusedVector,
@@ -219,25 +234,27 @@ async function chatWithOllamaAndReturn(endpoint, model, userText, onDelta) {
     }
     return full;
 }
-const CVE_VOCAB = [
-    // 권한/명령/셸
-    "exec", "spawn", "shell", "system", "popen", "child_process", "bash", "sh", "subprocess",
-    // 파일/환경
-    "fs.read", "fs.write", "chmod", "chown", "readdir", "env", "secret", "password", "credential",
-    // SQL
-    "select", "insert", "update", "delete", "where", "from", "union", "concat", "format", "fstring",
-    // 네트워크/HTTP
-    "fetch", "axios", "request", "http", "https", "curl",
-    // 템플릿/서버사이드 인젝션
-    "template", "render", "ejs", "jinja", "mustache", "pickle", "yaml.load", "eval", "Function",
-    // 역직렬화
-    "deserialize", "pickle.loads", "yaml.unsafe", "ObjectInputStream",
-    // 정규표현식
-    "regex", "re.compile", "catastrophic",
-    // 기타
-    "vulnerable_pkg_2023", "path.join", "userinput", "query", "stringConcat"
-];
-const CVE_VECTOR_DB = [
+/** [NEW] 동적으로 로드된 벡터 DB (generated_cve_db.json) */
+let DYN_CVE_DB = [];
+/** [NEW] generated_cve_db.json 로드 함수 */
+function loadGeneratedCveDb(ctx) {
+    try {
+        const base = ctx ? ctx.extensionUri.fsPath : process.cwd();
+        const p = path.join(base, "cve_data", "generated_cve_db.json"); // scripts/build_cve_vocab.ts 출력 경로
+        if (!fs.existsSync(p))
+            return [];
+        const raw = fs.readFileSync(p, "utf8");
+        const arr = JSON.parse(raw);
+        // sanity check
+        return Array.isArray(arr) ? arr : [];
+    }
+    catch (e) {
+        console.error("[CVE] loadGeneratedCveDb error:", e);
+        return [];
+    }
+}
+/** [KEEP] 내장 Fallback DB (최소 동작 보장). 실제 분석은 DYN_CVE_DB 우선. */
+const FALLBACK_CVE_VECTOR_DB = [
     {
         id: "SIG-CMD-INJECT",
         title: "Command Injection via shell/exec",
@@ -275,10 +292,15 @@ const CVE_VECTOR_DB = [
         tokens: { vulnerable_pkg_2023: 2.0 }
     }
 ];
-/** 코드 문자열 → 토큰 벡터(가중치 포함) */
+/** [NEW] 실제로 사용할 DB 선택 (동적 우선, 없으면 Fallback) */
+function getSigDB() {
+    return (DYN_CVE_DB && DYN_CVE_DB.length) ? DYN_CVE_DB : FALLBACK_CVE_VECTOR_DB;
+}
+/** 코드 문자열 → 토큰 벡터(가중치 포함)
+ *  (NOTE) 이 부분은 예전과 동일. 코드에서 의미 토큰을 추출한다.
+ */
 function vectorizeCodeToTokens(code) {
     const lower = code.toLowerCase();
-    // 간단한 파생 토큰 추출
     const features = {};
     const add = (k, w = 1) => (features[k] = (features[k] ?? 0) + w);
     // 일반 토큰
@@ -334,10 +356,12 @@ function vectorizeCodeToTokens(code) {
     // 취약 패키지(예시)
     if (/vulnerable[_-]?pkg[_-]?2023/.test(lower))
         add("vulnerable_pkg_2023", 2);
-    // vocab에 없는 토큰 무시는 자연스럽게 0으로 남음
     return features;
 }
-/** 코사인 유사도 */
+/** 코사인 유사도 (공통키 합집합 기반)
+ *  (NOTE) 예전엔 고정 vocab으로 투영 후 비교 → 삭제.
+ *  객체 키의 합집합을 돌며 내적/노름을 계산하므로 자동 정렬된다.
+ */
 function cosineSim(a, b) {
     let dot = 0, na = 0, nb = 0;
     const keys = new Set([...Object.keys(a), ...Object.keys(b)]);
@@ -352,19 +376,13 @@ function cosineSim(a, b) {
         return 0;
     return dot / (Math.sqrt(na) * Math.sqrt(nb));
 }
-/** 코드 벡터 vs 시그니처 DB 유사도 계산 → severity 0..1, 상위 매치 리턴 */
+/** 코드 벡터 vs (동적/내장) 시그니처 DB 유사도 계산 → severity 0..1, 상위 매치 리턴 */
 function vectorCveScan(code) {
     const codeVec = vectorizeCodeToTokens(code);
-    // vocab 외 토큰은 0, 간이 정규화
-    const project = (v) => {
-        const out = {};
-        for (const t of CVE_VOCAB)
-            if (v[t])
-                out[t] = v[t];
-        return out;
-    };
-    const results = CVE_VECTOR_DB.map(sig => {
-        const sim = cosineSim(project(codeVec), project(sig.tokens));
+    const DB = getSigDB();
+    const results = DB.map(sig => {
+        // [중요] 투영 없이 그대로 비교 (키 합집합 기반 코사인)
+        const sim = cosineSim(codeVec, sig.tokens);
         // 유사도 기반 가중 severity: sig.baseSeverity * smooth(sim)
         const sev = sig.baseSeverity * Math.min(1, Math.pow(Math.max(0, sim), 0.8) * 1.2);
         return { id: sig.id, title: sig.title, similarity: sim, severity01: sev, notes: sig.notes ?? "" };
@@ -376,7 +394,6 @@ function vectorCveScan(code) {
         agg = 1 - (1 - agg) * (1 - r.severity01);
     return { aggregatedSeverity01: Math.min(1, agg), matches: results.filter(r => r.similarity > 0.15).slice(0, 5) };
 }
-/* ---------- 유틸 ---------- */
 const clamp01 = (x) => Math.max(0, Math.min(1, x));
 function mapBigOTo01(bigO) {
     const lut = {
@@ -385,7 +402,6 @@ function mapBigOTo01(bigO) {
     return lut[bigO] ?? 0.50;
 }
 const sat01 = (x, k) => clamp01(1 - Math.exp(-k * Math.max(0, x))); // 포화형 스케일러
-/* ---------- 정밀 리소스/보안 분석 ---------- */
 function preciseResourceAndSecurityScan(code) {
     const reasons = [];
     const lower = code.toLowerCase();
@@ -415,21 +431,14 @@ function preciseResourceAndSecurityScan(code) {
     bufAlloc.forEach(m => inc(parseInt(m[1], 10)));
     // new Array(N) / Array(N).fill(K)
     const arrAlloc = [...code.matchAll(/\bnew\s+Array\s*\(\s*(\d+)\s*\)|\bArray\s*\(\s*(\d+)\s*\)\.fill/gi)];
-    arrAlloc.forEach(m => inc(((parseInt(m[1] || m[2], 10) || 0) * 8))); // 요소 8바이트 가정
-    // 문자열 리터럴 길이
+    arrAlloc.forEach(m => inc(((parseInt(m[1] || m[2], 10) || 0) * 8)));
+    // 문자열/객체/배열 리터럴 크기 근사
     const strLits = [...code.matchAll(/(["'`])([^"'`\\]|\\.){1,200}\1/g)];
     strLits.forEach(m => inc((m[0]?.length || 0)));
-    // 객체/배열 리터럴(요소 수 기반)
     const arrayLits = [...code.matchAll(/\[([^\[\]]{0,400})\]/g)];
-    arrayLits.forEach(m => {
-        const elems = (m[1].split(",").length) || 0;
-        inc(elems * 16); // 요소 16바이트 가정
-    });
+    arrayLits.forEach(m => { const elems = (m[1].split(",").length) || 0; inc(elems * 16); });
     const objectLits = [...code.matchAll(/\{([^{}]{0,400})\}/g)];
-    objectLits.forEach(m => {
-        const props = (m[1].match(/:/g) || []).length;
-        inc(props * 24); // 프로퍼티당 대략 24바이트
-    });
+    objectLits.forEach(m => { const props = (m[1].match(/:/g) || []).length; inc(props * 24); });
     // 컬렉션(Map/Set)
     const mapSet = (code.match(/\bnew\s+(Map|Set)\s*\(/g) || []).length;
     inc(mapSet * 128);
@@ -458,13 +467,13 @@ function preciseResourceAndSecurityScan(code) {
         bigO = "O(n)";
     else
         bigO = "unknown";
-    // 메모리/호출 카운트(레거시 호환)
+    // 메모리/호출 카운트
     const memAllocs = (bufAlloc.length + arrAlloc.length + arrayLits.length + objectLits.length + mapSet);
     // CVE: 룰 + 벡터화 결합
     const regexRules = evaluateCveFromCodeRegex(code);
     const vectorRules = vectorCveScan(code);
     const cveSeverity01 = clamp01(1 - (1 - regexRules.severity01) * (1 - vectorRules.aggregatedSeverity01));
-    // 이유 채우기
+    // 이유 채우기 (증거 표시용)
     if (regexRules.hints.length)
         reasons.push(...regexRules.hints.map(h => `regex:${h}`));
     if (vectorRules.matches.length) {
@@ -496,7 +505,7 @@ function preciseResourceAndSecurityScan(code) {
         _reasons: reasons
     };
 }
-/* ---------- 정규식 기반 CVE 룰(기존 강화) ---------- */
+/* ---------- 정규식 기반 CVE 룰 ---------- */
 function evaluateCveFromCodeRegex(code) {
     const rules = [
         { id: "CVE-CMD-EXEC", rx: /\b(os\.system|subprocess\.(Popen|call|run)|child_process\.(exec|spawn)|Runtime\.getRuntime\(\)\.exec|system\()/i, sev: 0.95, hint: "command execution" },
@@ -556,26 +565,21 @@ async function runStaticPipeline(code, filename, _language) {
 }
 /* ---------- 가중치 ---------- */
 const WF = { api: 0.40, core: 0.25, diff: 0.20, schema: 0.15 };
-const WR = { bigO: 0.32, cc: 0.18, mem: 0.22, ext: 0.18, io: 0.10 }; // 리소스 차원 내부 가중
+const WR = { bigO: 0.32, cc: 0.18, mem: 0.22, ext: 0.18, io: 0.10 };
 const WD = { cve: 0.42, rep: 0.25, lic: 0.10, perm: 0.23 };
 /* ---- 차원 점수 계산 ---- */
 function computeFSignalsFromMetrics(m) {
-    const apiRatio = clamp01(m.apiChanges / Math.max(1, m.totalApis)); // 여기선 apiChanges=0 (diff 기반 사용 시 대체)
+    const apiRatio = clamp01(m.apiChanges / Math.max(1, m.totalApis));
     const diffRatio = clamp01(m.diffChangedLines / Math.max(1, m.totalLines));
     const v = apiRatio * WF.api + (m.coreTouched ? 1 : 0) * WF.core + diffRatio * WF.diff + (m.schemaChanged ? 1 : 0) * WF.schema;
     return clamp01(v);
 }
 function computeRSignalsFromMetrics(m) {
-    // 시간 복잡도: BigO, CC, 루프 깊이/재귀/정렬 힌트는 BigO에 이미 간접 반영
     const bigO = mapBigOTo01(m.bigO);
-    // CC 정규화: 1~20 → 0..1 사상 (20에서 0.95 부근)
     const ccNorm = clamp01(1 - Math.exp(-0.12 * Math.max(0, m.cc - 1)));
-    // 메모리: 바이트 근사(로그 스케일)와 할당 수 포화 결합
-    // ~64KB → 0.4, ~1MB → 0.8, ~16MB → 0.95 근사
-    const memByteNorm = clamp01(Math.log2(Math.max(1, m.memBytesApprox)) / 24); // 2^24 ≈ 16MB
+    const memByteNorm = clamp01(Math.log2(Math.max(1, m.memBytesApprox)) / 24);
     const memAllocNorm = clamp01(1 - Math.exp(-0.06 * m.memAllocs));
     const mem = clamp01(0.7 * memByteNorm + 0.3 * memAllocNorm);
-    // 외부 호출/IO 포화
     const ext = clamp01(1 - Math.exp(-0.05 * m.externalCalls));
     const io = clamp01(1 - Math.exp(-0.06 * m.ioCalls));
     const v = bigO * WR.bigO + ccNorm * WR.cc + mem * WR.mem + ext * WR.ext + io * WR.io;
@@ -591,7 +595,6 @@ function analyzeFromStaticMetrics(metrics, filename) {
     const R = computeRSignalsFromMetrics(metrics);
     const D = computeDSignalsFromMetrics(metrics);
     const vector = [F, R, D];
-    // 신호/이유 테이블
     const signalTable = {
         F: { apiRatio: clamp01(metrics.apiChanges / Math.max(1, metrics.totalApis)),
             coreModuleModified: metrics.coreTouched ? 1 : 0,
@@ -612,13 +615,6 @@ function analyzeFromStaticMetrics(metrics, filename) {
     return { vector, filename, signalTable, reasons: metrics._reasons };
 }
 /* ---------- CRAI 식(2) ---------- */
-/**
- * CRAI = min(10, (1-α)B + αC)
- *  B = 10 (wF*SF + wR*SR + wD*SD)
- *  C = min(10, 10 [ SD + (1-SD) ( (wF/(wF+wR))SF + (wR/(wF+wR))SR ) ])
- *  ρ = SD / (SF + SR + SD + 1e-6)
- *  α = s(SD; 0.4, 0.7) * (0.5 + 0.5ρ)
- */
 function scoreFromVector(v, top) {
     const cfg = top ?? { wF: 0.40, wR: 0.30, wD: 0.30 };
     const SF = clamp01(v[0]);
@@ -687,7 +683,7 @@ function detectSuggestedFileName(fullText, _fallbackLang) {
     return last.replace(/^\/+/, "");
 }
 /* ======================================================================
- *  승인 후 코드 적용: (1) 현재 파일 덮어쓰기 (2) 커서에 삽입 (3) 새 파일로 저장
+ *  승인 후 코드 적용
  * ==================================================================== */
 async function handleApproval(code, language, suggested) {
     if (!vscode.workspace.workspaceFolders?.length) {
