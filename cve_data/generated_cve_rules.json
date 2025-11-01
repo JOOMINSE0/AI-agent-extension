@@ -1,0 +1,1662 @@
+{
+  "generated_at": "2025-11-01T01:19:43.031970Z",
+  "n_signatures": 7,
+  "signatures": [
+    {
+      "id": "SIG-RACE_CONDITION",
+      "title": "Auto-generated signature for race_condition",
+      "group": "race_condition",
+      "baseSeverity": 0.75,
+      "support_docs": 42,
+      "rules": [
+        {
+          "rx": "\\brace_condition\\b",
+          "w": 1.0,
+          "token": "race_condition",
+          "support": 42,
+          "idf": 5.246
+        },
+        {
+          "rx": "\\brace\\b",
+          "w": 0.953,
+          "token": "race",
+          "support": 40,
+          "idf": 5.269
+        },
+        {
+          "rx": "\\bcondition\\b",
+          "w": 0.8793,
+          "token": "condition",
+          "support": 38,
+          "idf": 4.981
+        },
+        {
+          "rx": "\\bto\\b",
+          "w": 0.549,
+          "token": "to",
+          "support": 38,
+          "idf": 1.665
+        },
+        {
+          "rx": "\\ban\\b",
+          "w": 0.5245,
+          "token": "an",
+          "support": 34,
+          "idf": 2.024
+        },
+        {
+          "rx": "\\bsynchronization\\b",
+          "w": 0.5177,
+          "token": "synchronization",
+          "support": 19,
+          "idf": 6.011
+        },
+        {
+          "rx": "\\bconcurrent\\b",
+          "w": 0.5149,
+          "token": "concurrent",
+          "support": 19,
+          "idf": 5.962
+        },
+        {
+          "rx": "\\bshared\\b",
+          "w": 0.5123,
+          "token": "shared",
+          "support": 19,
+          "idf": 5.916
+        },
+        {
+          "rx": "\\battacker\\b",
+          "w": 0.5063,
+          "token": "attacker",
+          "support": 31,
+          "idf": 2.372
+        },
+        {
+          "rx": "\\blocally\\.\\b",
+          "w": 0.5027,
+          "token": "locally.",
+          "support": 25,
+          "idf": 3.595
+        },
+        {
+          "rx": "\\bauthorized\\b",
+          "w": 0.5017,
+          "token": "authorized",
+          "support": 24,
+          "idf": 3.859
+        },
+        {
+          "rx": "\\bin\\b",
+          "w": 0.4676,
+          "token": "in",
+          "support": 36,
+          "idf": 1.166
+        },
+        {
+          "rx": "\\bexecution\\b",
+          "w": 0.4582,
+          "token": "execution",
+          "support": 25,
+          "idf": 3.196
+        },
+        {
+          "rx": "\\bresource\\b",
+          "w": 0.4571,
+          "token": "resource",
+          "support": 19,
+          "idf": 4.929
+        },
+        {
+          "rx": "\\bprivileges\\b",
+          "w": 0.4478,
+          "token": "privileges",
+          "support": 23,
+          "idf": 3.543
+        },
+        {
+          "rx": "\\busing\\b",
+          "w": 0.434,
+          "token": "using",
+          "support": 19,
+          "idf": 4.518
+        },
+        {
+          "rx": "\\ballows\\b",
+          "w": 0.4307,
+          "token": "allows",
+          "support": 31,
+          "idf": 1.522
+        },
+        {
+          "rx": "\\belevate\\b",
+          "w": 0.4244,
+          "token": "elevate",
+          "support": 20,
+          "idf": 3.989
+        },
+        {
+          "rx": "\\bwindows\\b",
+          "w": 0.418,
+          "token": "windows",
+          "support": 21,
+          "idf": 3.481
+        },
+        {
+          "rx": "\\bwith\\b",
+          "w": 0.3669,
+          "token": "with",
+          "support": 20,
+          "idf": 3.043
+        },
+        {
+          "rx": "\\btime\\-of\\-check\\b",
+          "w": 0.3252,
+          "token": "time-of-check",
+          "support": 12,
+          "idf": 6.442
+        },
+        {
+          "rx": "\\btime\\-of\\-use\\b",
+          "w": 0.3252,
+          "token": "time-of-use",
+          "support": 12,
+          "idf": 6.442
+        },
+        {
+          "rx": "\\bimproper\\b",
+          "w": 0.3021,
+          "token": "improper",
+          "support": 19,
+          "idf": 2.162
+        },
+        {
+          "rx": "\\btoctou\\b",
+          "w": 0.2911,
+          "token": "toctou",
+          "support": 10,
+          "idf": 6.609
+        },
+        {
+          "rx": "\\bservice\\b",
+          "w": 0.1963,
+          "token": "service",
+          "support": 10,
+          "idf": 3.814
+        },
+        {
+          "rx": "\\bcode\\b",
+          "w": 0.1789,
+          "token": "code",
+          "support": 11,
+          "idf": 2.651
+        },
+        {
+          "rx": "\\blocal\\b",
+          "w": 0.157,
+          "token": "local",
+          "support": 9,
+          "idf": 3.333
+        },
+        {
+          "rx": "\\bfor\\b",
+          "w": 0.1569,
+          "token": "for",
+          "support": 10,
+          "idf": 2.524
+        },
+        {
+          "rx": "\\bescalation\\b",
+          "w": 0.1513,
+          "token": "escalation",
+          "support": 8,
+          "idf": 4.392
+        },
+        {
+          "rx": "\\bof\\b",
+          "w": 0.1388,
+          "token": "of",
+          "support": 9,
+          "idf": 1.601
+        }
+      ],
+      "cooccur": [],
+      "negatives": [
+        {
+          "rx": "\\bprepare\\b|\\bparameterized\\b|\\bbindParam\\b",
+          "penalty": 0.2,
+          "note": "parameterized query"
+        },
+        {
+          "rx": "\\bexecFile\\b",
+          "penalty": 0.08,
+          "note": "execFile safer than exec"
+        }
+      ]
+    },
+    {
+      "id": "SIG-XSS",
+      "title": "Auto-generated signature for xss",
+      "group": "xss",
+      "baseSeverity": 0.8,
+      "support_docs": 751,
+      "rules": [
+        {
+          "rx": "\\bxss\\b",
+          "w": 1.0,
+          "token": "xss",
+          "support": 751,
+          "idf": 2.384
+        },
+        {
+          "rx": "\\bcross\\-site\\b",
+          "w": 0.9367,
+          "token": "cross-site",
+          "support": 738,
+          "idf": 2.321
+        },
+        {
+          "rx": "\\bxss\\.\\b",
+          "w": 0.7988,
+          "token": "xss.",
+          "support": 578,
+          "idf": 2.645
+        },
+        {
+          "rx": "\\baffects\\b",
+          "w": 0.7913,
+          "token": "affects",
+          "support": 684,
+          "idf": 1.951
+        },
+        {
+          "rx": "\\bfrom\\b",
+          "w": 0.7905,
+          "token": "from",
+          "support": 695,
+          "idf": 1.884
+        },
+        {
+          "rx": "\\bthrough\\b",
+          "w": 0.7805,
+          "token": "through",
+          "support": 690,
+          "idf": 1.869
+        },
+        {
+          "rx": "\\bissue\\b",
+          "w": 0.7711,
+          "token": "issue",
+          "support": 691,
+          "idf": 1.826
+        },
+        {
+          "rx": "\\bscripting\\b",
+          "w": 0.7367,
+          "token": "scripting",
+          "support": 527,
+          "idf": 2.738
+        },
+        {
+          "rx": "\\ballows\\b",
+          "w": 0.7176,
+          "token": "allows",
+          "support": 705,
+          "idf": 1.522
+        },
+        {
+          "rx": "\\bvulnerability\\b",
+          "w": 0.7104,
+          "token": "vulnerability",
+          "support": 715,
+          "idf": 1.439
+        },
+        {
+          "rx": "\\bpage\\b",
+          "w": 0.7009,
+          "token": "page",
+          "support": 480,
+          "idf": 2.796
+        },
+        {
+          "rx": "\\bweb\\b",
+          "w": 0.6942,
+          "token": "web",
+          "support": 487,
+          "idf": 2.715
+        },
+        {
+          "rx": "\\binput\\b",
+          "w": 0.6833,
+          "token": "input",
+          "support": 491,
+          "idf": 2.686
+        },
+        {
+          "rx": "\\bgeneration\\b",
+          "w": 0.6815,
+          "token": "generation",
+          "support": 473,
+          "idf": 2.829
+        },
+        {
+          "rx": "\\bduring\\b",
+          "w": 0.6802,
+          "token": "during",
+          "support": 474,
+          "idf": 2.812
+        },
+        {
+          "rx": "\\bin\\b",
+          "w": 0.6776,
+          "token": "in",
+          "support": 739,
+          "idf": 1.166
+        },
+        {
+          "rx": "\\breflected\\b",
+          "w": 0.6499,
+          "token": "reflected",
+          "support": 445,
+          "idf": 2.906
+        },
+        {
+          "rx": "\\bneutralization\\b",
+          "w": 0.6472,
+          "token": "neutralization",
+          "support": 473,
+          "idf": 2.603
+        },
+        {
+          "rx": "\\bthis\\b",
+          "w": 0.6246,
+          "token": "this",
+          "support": 606,
+          "idf": 1.555
+        },
+        {
+          "rx": "\\bimproper\\b",
+          "w": 0.5829,
+          "token": "improper",
+          "support": 475,
+          "idf": 2.162
+        },
+        {
+          "rx": "\\bof\\b",
+          "w": 0.5048,
+          "token": "of",
+          "support": 481,
+          "idf": 1.601
+        },
+        {
+          "rx": "\\bstored\\b",
+          "w": 0.4376,
+          "token": "stored",
+          "support": 276,
+          "idf": 3.361
+        },
+        {
+          "rx": "\\bcsrf\\b",
+          "w": 0.3425,
+          "token": "csrf",
+          "support": 212,
+          "idf": 3.405
+        },
+        {
+          "rx": "\\bforgery\\b",
+          "w": 0.3352,
+          "token": "forgery",
+          "support": 212,
+          "idf": 3.296
+        },
+        {
+          "rx": "\\brequest\\b",
+          "w": 0.3342,
+          "token": "request",
+          "support": 215,
+          "idf": 3.193
+        },
+        {
+          "rx": "\\bnotfound\\b",
+          "w": 0.2429,
+          "token": "notfound",
+          "support": 126,
+          "idf": 4.03
+        },
+        {
+          "rx": "\\bxss\\.this\\b",
+          "w": 0.1929,
+          "token": "xss.this",
+          "support": 102,
+          "idf": 4.372
+        },
+        {
+          "rx": "\\bwp\\b",
+          "w": 0.1802,
+          "token": "wp",
+          "support": 56,
+          "idf": 4.334
+        },
+        {
+          "rx": "\\bwordpress\\b",
+          "w": 0.1319,
+          "token": "wordpress",
+          "support": 42,
+          "idf": 3.631
+        },
+        {
+          "rx": "\\bfor\\b",
+          "w": 0.1153,
+          "token": "for",
+          "support": 61,
+          "idf": 2.524
+        }
+      ],
+      "cooccur": [
+        {
+          "all": [
+            "\\b(input|req\\.body|req\\.query|argv)\\b",
+            "\\b(exec|spawn|subprocess|child_process)\\b"
+          ],
+          "bonus": 0.15
+        }
+      ],
+      "negatives": [
+        {
+          "rx": "\\bprepare\\b|\\bparameterized\\b|\\bbindParam\\b",
+          "penalty": 0.2,
+          "note": "parameterized query"
+        },
+        {
+          "rx": "\\bexecFile\\b",
+          "penalty": 0.08,
+          "note": "execFile safer than exec"
+        }
+      ]
+    },
+    {
+      "id": "SIG-OTHER",
+      "title": "Auto-generated signature for other",
+      "group": "other",
+      "baseSeverity": 0.7,
+      "support_docs": 1333,
+      "rules": [
+        {
+          "rx": "\\bto\\b",
+          "w": 0.844,
+          "token": "to",
+          "support": 813,
+          "idf": 1.665
+        },
+        {
+          "rx": "\\bin\\b",
+          "w": 0.7091,
+          "token": "in",
+          "support": 1025,
+          "idf": 1.166
+        },
+        {
+          "rx": "\\bthe\\b",
+          "w": 0.6677,
+          "token": "the",
+          "support": 570,
+          "idf": 2.008
+        },
+        {
+          "rx": "\\bfor\\b",
+          "w": 0.5149,
+          "token": "for",
+          "support": 467,
+          "idf": 2.524
+        },
+        {
+          "rx": "\\bof\\b",
+          "w": 0.4971,
+          "token": "of",
+          "support": 641,
+          "idf": 1.601
+        },
+        {
+          "rx": "\\bvulnerability\\b",
+          "w": 0.4847,
+          "token": "vulnerability",
+          "support": 676,
+          "idf": 1.439
+        },
+        {
+          "rx": "\\bphp\\b",
+          "w": 0.482,
+          "token": "php",
+          "support": 170,
+          "idf": 3.808
+        },
+        {
+          "rx": "\\ban\\b",
+          "w": 0.4733,
+          "token": "an",
+          "support": 471,
+          "idf": 2.024
+        },
+        {
+          "rx": "\\ballows\\b",
+          "w": 0.4705,
+          "token": "allows",
+          "support": 641,
+          "idf": 1.522
+        },
+        {
+          "rx": "\\band\\b",
+          "w": 0.4398,
+          "token": "and",
+          "support": 445,
+          "idf": 2.276
+        },
+        {
+          "rx": "\\bthis\\b",
+          "w": 0.4345,
+          "token": "this",
+          "support": 625,
+          "idf": 1.555
+        },
+        {
+          "rx": "\\bfile\\b",
+          "w": 0.4245,
+          "token": "file",
+          "support": 276,
+          "idf": 2.897
+        },
+        {
+          "rx": "\\battacker\\b",
+          "w": 0.3986,
+          "token": "attacker",
+          "support": 382,
+          "idf": 2.372
+        },
+        {
+          "rx": "\\bis\\b",
+          "w": 0.3576,
+          "token": "is",
+          "support": 377,
+          "idf": 2.471
+        },
+        {
+          "rx": "\\bfrom\\b",
+          "w": 0.3173,
+          "token": "from",
+          "support": 409,
+          "idf": 1.884
+        },
+        {
+          "rx": "\\bthrough\\b",
+          "w": 0.3147,
+          "token": "through",
+          "support": 395,
+          "idf": 1.869
+        },
+        {
+          "rx": "\\bissue\\b",
+          "w": 0.3033,
+          "token": "issue",
+          "support": 401,
+          "idf": 1.826
+        },
+        {
+          "rx": "\\bversions\\b",
+          "w": 0.2912,
+          "token": "versions",
+          "support": 307,
+          "idf": 2.668
+        },
+        {
+          "rx": "\\baffects\\b",
+          "w": 0.29,
+          "token": "affects",
+          "support": 367,
+          "idf": 1.951
+        },
+        {
+          "rx": "\\bwordpress\\b",
+          "w": 0.2855,
+          "token": "wordpress",
+          "support": 130,
+          "idf": 3.631
+        },
+        {
+          "rx": "\\bcontrol\\b",
+          "w": 0.2798,
+          "token": "control",
+          "support": 229,
+          "idf": 3.497
+        },
+        {
+          "rx": "\\bwindows\\b",
+          "w": 0.2789,
+          "token": "windows",
+          "support": 156,
+          "idf": 3.481
+        },
+        {
+          "rx": "\\baccess\\b",
+          "w": 0.266,
+          "token": "access",
+          "support": 216,
+          "idf": 3.31
+        },
+        {
+          "rx": "\\bprivileges\\b",
+          "w": 0.2648,
+          "token": "privileges",
+          "support": 154,
+          "idf": 3.543
+        },
+        {
+          "rx": "\\blocal\\b",
+          "w": 0.2638,
+          "token": "local",
+          "support": 226,
+          "idf": 3.333
+        },
+        {
+          "rx": "\\bimproper\\b",
+          "w": 0.2575,
+          "token": "improper",
+          "support": 287,
+          "idf": 2.162
+        },
+        {
+          "rx": "\\bwith\\b",
+          "w": 0.2523,
+          "token": "with",
+          "support": 243,
+          "idf": 3.043
+        },
+        {
+          "rx": "\\bremote\\b",
+          "w": 0.2421,
+          "token": "remote",
+          "support": 244,
+          "idf": 2.778
+        },
+        {
+          "rx": "\\belevate\\b",
+          "w": 0.2349,
+          "token": "elevate",
+          "support": 114,
+          "idf": 3.989
+        },
+        {
+          "rx": "\\bauthorized\\b",
+          "w": 0.2191,
+          "token": "authorized",
+          "support": 110,
+          "idf": 3.859
+        }
+      ],
+      "cooccur": [],
+      "negatives": [
+        {
+          "rx": "\\bprepare\\b|\\bparameterized\\b|\\bbindParam\\b",
+          "penalty": 0.2,
+          "note": "parameterized query"
+        },
+        {
+          "rx": "\\bexecFile\\b",
+          "penalty": 0.08,
+          "note": "execFile safer than exec"
+        }
+      ]
+    },
+    {
+      "id": "SIG-RCE",
+      "title": "Auto-generated signature for rce",
+      "group": "rce",
+      "baseSeverity": 0.7,
+      "support_docs": 151,
+      "rules": [
+        {
+          "rx": "\\bremote\\b",
+          "w": 0.9947,
+          "token": "remote",
+          "support": 149,
+          "idf": 2.778
+        },
+        {
+          "rx": "\\brce\\b",
+          "w": 0.9757,
+          "token": "rce",
+          "support": 151,
+          "idf": 3.859
+        },
+        {
+          "rx": "\\bcode\\b",
+          "w": 0.9671,
+          "token": "code",
+          "support": 148,
+          "idf": 2.651
+        },
+        {
+          "rx": "\\bexecution\\b",
+          "w": 0.8478,
+          "token": "execution",
+          "support": 147,
+          "idf": 3.196
+        },
+        {
+          "rx": "\\bvulnerability\\b",
+          "w": 0.6374,
+          "token": "vulnerability",
+          "support": 133,
+          "idf": 1.439
+        },
+        {
+          "rx": "\\bto\\b",
+          "w": 0.5613,
+          "token": "to",
+          "support": 111,
+          "idf": 1.665
+        },
+        {
+          "rx": "\\brequired\\b",
+          "w": 0.5047,
+          "token": "required",
+          "support": 87,
+          "idf": 4.178
+        },
+        {
+          "rx": "\\bvulnerability\\.\\b",
+          "w": 0.5034,
+          "token": "vulnerability.",
+          "support": 91,
+          "idf": 3.689
+        },
+        {
+          "rx": "\\binstallations\\b",
+          "w": 0.5007,
+          "token": "installations",
+          "support": 86,
+          "idf": 4.203
+        },
+        {
+          "rx": "\\birfanview\\b",
+          "w": 0.4977,
+          "token": "irfanview",
+          "support": 46,
+          "idf": 5.157
+        },
+        {
+          "rx": "\\bcadimage\\b",
+          "w": 0.4977,
+          "token": "cadimage",
+          "support": 46,
+          "idf": 5.157
+        },
+        {
+          "rx": "\\bthis\\b",
+          "w": 0.4894,
+          "token": "this",
+          "support": 101,
+          "idf": 1.555
+        },
+        {
+          "rx": "\\bexploit\\b",
+          "w": 0.4873,
+          "token": "exploit",
+          "support": 91,
+          "idf": 3.604
+        },
+        {
+          "rx": "\\battackers\\b",
+          "w": 0.4758,
+          "token": "attackers",
+          "support": 92,
+          "idf": 3.379
+        },
+        {
+          "rx": "\\bon\\b",
+          "w": 0.4638,
+          "token": "on",
+          "support": 95,
+          "idf": 2.964
+        },
+        {
+          "rx": "\\bparsing\\b",
+          "w": 0.4621,
+          "token": "parsing",
+          "support": 78,
+          "idf": 4.253
+        },
+        {
+          "rx": "\\bexecute\\b",
+          "w": 0.4594,
+          "token": "execute",
+          "support": 93,
+          "idf": 3.074
+        },
+        {
+          "rx": "\\binteraction\\b",
+          "w": 0.4553,
+          "token": "interaction",
+          "support": 82,
+          "idf": 3.792
+        },
+        {
+          "rx": "\\baffected\\b",
+          "w": 0.4537,
+          "token": "affected",
+          "support": 91,
+          "idf": 3.104
+        },
+        {
+          "rx": "\\bis\\b",
+          "w": 0.4521,
+          "token": "is",
+          "support": 100,
+          "idf": 2.471
+        },
+        {
+          "rx": "\\barbitrary\\b",
+          "w": 0.4508,
+          "token": "arbitrary",
+          "support": 94,
+          "idf": 2.865
+        },
+        {
+          "rx": "\\bthe\\b",
+          "w": 0.4358,
+          "token": "the",
+          "support": 101,
+          "idf": 2.008
+        },
+        {
+          "rx": "\\buser\\b",
+          "w": 0.4245,
+          "token": "user",
+          "support": 87,
+          "idf": 2.955
+        },
+        {
+          "rx": "\\bthat\\b",
+          "w": 0.4093,
+          "token": "that",
+          "support": 83,
+          "idf": 3.023
+        },
+        {
+          "rx": "\\bfile\\b",
+          "w": 0.404,
+          "token": "file",
+          "support": 83,
+          "idf": 2.897
+        },
+        {
+          "rx": "\\btarget\\b",
+          "w": 0.4001,
+          "token": "target",
+          "support": 65,
+          "idf": 4.612
+        },
+        {
+          "rx": "\\bof\\b",
+          "w": 0.3776,
+          "token": "of",
+          "support": 97,
+          "idf": 1.601
+        },
+        {
+          "rx": "\\ballows\\b",
+          "w": 0.3518,
+          "token": "allows",
+          "support": 93,
+          "idf": 1.522
+        },
+        {
+          "rx": "\\bin\\b",
+          "w": 0.3449,
+          "token": "in",
+          "support": 97,
+          "idf": 1.166
+        },
+        {
+          "rx": "\\bplugin\\.\\b",
+          "w": 0.3098,
+          "token": "plugin.",
+          "support": 46,
+          "idf": 5.157
+        }
+      ],
+      "cooccur": [
+        {
+          "all": [
+            "\\b(input|req\\.body|req\\.query|argv)\\b",
+            "\\b(exec|spawn|subprocess|child_process)\\b"
+          ],
+          "bonus": 0.15
+        }
+      ],
+      "negatives": [
+        {
+          "rx": "\\bprepare\\b|\\bparameterized\\b|\\bbindParam\\b",
+          "penalty": 0.2,
+          "note": "parameterized query"
+        },
+        {
+          "rx": "\\bexecFile\\b",
+          "penalty": 0.08,
+          "note": "execFile safer than exec"
+        }
+      ]
+    },
+    {
+      "id": "SIG-CMD",
+      "title": "Auto-generated signature for cmd",
+      "group": "cmd",
+      "baseSeverity": 0.95,
+      "support_docs": 401,
+      "rules": [
+        {
+          "rx": "\\bcode\\b",
+          "w": 0.8743,
+          "token": "code",
+          "support": 275,
+          "idf": 2.651
+        },
+        {
+          "rx": "\\bto\\b",
+          "w": 0.8696,
+          "token": "to",
+          "support": 317,
+          "idf": 1.665
+        },
+        {
+          "rx": "\\ban\\b",
+          "w": 0.8333,
+          "token": "an",
+          "support": 304,
+          "idf": 2.024
+        },
+        {
+          "rx": "\\bin\\b",
+          "w": 0.7843,
+          "token": "in",
+          "support": 338,
+          "idf": 1.166
+        },
+        {
+          "rx": "\\bthe\\b",
+          "w": 0.7739,
+          "token": "the",
+          "support": 227,
+          "idf": 2.008
+        },
+        {
+          "rx": "\\bexecute\\b",
+          "w": 0.6813,
+          "token": "execute",
+          "support": 196,
+          "idf": 3.074
+        },
+        {
+          "rx": "\\bof\\b",
+          "w": 0.6279,
+          "token": "of",
+          "support": 238,
+          "idf": 1.601
+        },
+        {
+          "rx": "\\barbitrary\\b",
+          "w": 0.6095,
+          "token": "arbitrary",
+          "support": 203,
+          "idf": 2.865
+        },
+        {
+          "rx": "\\boffice\\b",
+          "w": 0.601,
+          "token": "office",
+          "support": 58,
+          "idf": 4.588
+        },
+        {
+          "rx": "\\battacker\\b",
+          "w": 0.5823,
+          "token": "attacker",
+          "support": 201,
+          "idf": 2.372
+        },
+        {
+          "rx": "\\band\\b",
+          "w": 0.5793,
+          "token": "and",
+          "support": 204,
+          "idf": 2.276
+        },
+        {
+          "rx": "\\bmicrosoft\\b",
+          "w": 0.5577,
+          "token": "microsoft",
+          "support": 63,
+          "idf": 4.037
+        },
+        {
+          "rx": "\\bthat\\b",
+          "w": 0.5136,
+          "token": "that",
+          "support": 117,
+          "idf": 3.023
+        },
+        {
+          "rx": "\\bcould\\b",
+          "w": 0.4415,
+          "token": "could",
+          "support": 131,
+          "idf": 3.101
+        },
+        {
+          "rx": "\\bvulnerability\\b",
+          "w": 0.4351,
+          "token": "vulnerability",
+          "support": 202,
+          "idf": 1.439
+        },
+        {
+          "rx": "\\bexecution\\b",
+          "w": 0.4032,
+          "token": "execution",
+          "support": 124,
+          "idf": 3.196
+        },
+        {
+          "rx": "\\bthis\\b",
+          "w": 0.3949,
+          "token": "this",
+          "support": 193,
+          "idf": 1.555
+        },
+        {
+          "rx": "\\bunauthorized\\b",
+          "w": 0.3751,
+          "token": "unauthorized",
+          "support": 78,
+          "idf": 3.729
+        },
+        {
+          "rx": "\\bby\\b",
+          "w": 0.3733,
+          "token": "by",
+          "support": 114,
+          "idf": 3.257
+        },
+        {
+          "rx": "\\bmalicious\\b",
+          "w": 0.3669,
+          "token": "malicious",
+          "support": 101,
+          "idf": 3.718
+        },
+        {
+          "rx": "\\bcontext\\b",
+          "w": 0.3642,
+          "token": "context",
+          "support": 91,
+          "idf": 4.186
+        },
+        {
+          "rx": "\\bafter\\b",
+          "w": 0.3636,
+          "token": "after",
+          "support": 71,
+          "idf": 4.262
+        },
+        {
+          "rx": "\\buse\\b",
+          "w": 0.3572,
+          "token": "use",
+          "support": 78,
+          "idf": 3.919
+        },
+        {
+          "rx": "\\bversions\\b",
+          "w": 0.3513,
+          "token": "versions",
+          "support": 122,
+          "idf": 2.668
+        },
+        {
+          "rx": "\\bfree\\b",
+          "w": 0.3509,
+          "token": "free",
+          "support": 72,
+          "idf": 4.087
+        },
+        {
+          "rx": "\\bcurrent\\b",
+          "w": 0.3497,
+          "token": "current",
+          "support": 86,
+          "idf": 4.195
+        },
+        {
+          "rx": "\\bexploitation\\b",
+          "w": 0.3398,
+          "token": "exploitation",
+          "support": 86,
+          "idf": 4.132
+        },
+        {
+          "rx": "\\baffected\\b",
+          "w": 0.3335,
+          "token": "affected",
+          "support": 106,
+          "idf": 3.104
+        },
+        {
+          "rx": "\\buser\\b",
+          "w": 0.3304,
+          "token": "user",
+          "support": 106,
+          "idf": 2.955
+        },
+        {
+          "rx": "\\bresult\\b",
+          "w": 0.3278,
+          "token": "result",
+          "support": 81,
+          "idf": 4.219
+        }
+      ],
+      "cooccur": [
+        {
+          "all": [
+            "\\b(input|req\\.body|req\\.query|argv)\\b",
+            "\\b(exec|spawn|subprocess|child_process)\\b"
+          ],
+          "bonus": 0.15
+        }
+      ],
+      "negatives": [
+        {
+          "rx": "\\bprepare\\b|\\bparameterized\\b|\\bbindParam\\b",
+          "penalty": 0.2,
+          "note": "parameterized query"
+        },
+        {
+          "rx": "\\bexecFile\\b",
+          "penalty": 0.08,
+          "note": "execFile safer than exec"
+        }
+      ]
+    },
+    {
+      "id": "SIG-BUFFER_OVERFLOW",
+      "title": "Auto-generated signature for buffer_overflow",
+      "group": "buffer_overflow",
+      "baseSeverity": 0.7,
+      "support_docs": 130,
+      "rules": [
+        {
+          "rx": "\\bbuffer_overflow\\b",
+          "w": 0.9985,
+          "token": "buffer_overflow",
+          "support": 130,
+          "idf": 4.132
+        },
+        {
+          "rx": "\\boverflow\\b",
+          "w": 0.9938,
+          "token": "overflow",
+          "support": 128,
+          "idf": 4.03
+        },
+        {
+          "rx": "\\bbuffer\\b",
+          "w": 0.9707,
+          "token": "buffer",
+          "support": 124,
+          "idf": 4.044
+        },
+        {
+          "rx": "\\bheap\\-based\\b",
+          "w": 0.7766,
+          "token": "heap-based",
+          "support": 92,
+          "idf": 4.474
+        },
+        {
+          "rx": "\\bcode\\b",
+          "w": 0.6058,
+          "token": "code",
+          "support": 96,
+          "idf": 2.651
+        },
+        {
+          "rx": "\\bin\\b",
+          "w": 0.5713,
+          "token": "in",
+          "support": 117,
+          "idf": 1.166
+        },
+        {
+          "rx": "\\bto\\b",
+          "w": 0.5391,
+          "token": "to",
+          "support": 101,
+          "idf": 1.665
+        },
+        {
+          "rx": "\\bexecute\\b",
+          "w": 0.434,
+          "token": "execute",
+          "support": 63,
+          "idf": 3.074
+        },
+        {
+          "rx": "\\battacker\\b",
+          "w": 0.4306,
+          "token": "attacker",
+          "support": 70,
+          "idf": 2.372
+        },
+        {
+          "rx": "\\ban\\b",
+          "w": 0.4225,
+          "token": "an",
+          "support": 73,
+          "idf": 2.024
+        },
+        {
+          "rx": "\\bthe\\b",
+          "w": 0.381,
+          "token": "the",
+          "support": 60,
+          "idf": 2.008
+        },
+        {
+          "rx": "\\ballows\\b",
+          "w": 0.3626,
+          "token": "allows",
+          "support": 72,
+          "idf": 1.522
+        },
+        {
+          "rx": "\\bof\\b",
+          "w": 0.29,
+          "token": "of",
+          "support": 56,
+          "idf": 1.601
+        },
+        {
+          "rx": "\\bwindows\\b",
+          "w": 0.289,
+          "token": "windows",
+          "support": 35,
+          "idf": 3.481
+        },
+        {
+          "rx": "\\bunauthorized\\b",
+          "w": 0.2811,
+          "token": "unauthorized",
+          "support": 33,
+          "idf": 3.729
+        },
+        {
+          "rx": "\\band\\b",
+          "w": 0.2784,
+          "token": "and",
+          "support": 50,
+          "idf": 2.276
+        },
+        {
+          "rx": "\\bvulnerability\\b",
+          "w": 0.2724,
+          "token": "vulnerability",
+          "support": 59,
+          "idf": 1.439
+        },
+        {
+          "rx": "\\barbitrary\\b",
+          "w": 0.2718,
+          "token": "arbitrary",
+          "support": 48,
+          "idf": 2.865
+        },
+        {
+          "rx": "\\bthat\\b",
+          "w": 0.2627,
+          "token": "that",
+          "support": 33,
+          "idf": 3.023
+        },
+        {
+          "rx": "\\bover\\b",
+          "w": 0.2564,
+          "token": "over",
+          "support": 27,
+          "idf": 4.362
+        },
+        {
+          "rx": "\\bnetwork\\.\\b",
+          "w": 0.254,
+          "token": "network.",
+          "support": 26,
+          "idf": 4.474
+        },
+        {
+          "rx": "\\bmalicious\\b",
+          "w": 0.2357,
+          "token": "malicious",
+          "support": 36,
+          "idf": 3.718
+        },
+        {
+          "rx": "\\bthis\\b",
+          "w": 0.2346,
+          "token": "this",
+          "support": 50,
+          "idf": 1.555
+        },
+        {
+          "rx": "\\blocally\\.\\b",
+          "w": 0.2303,
+          "token": "locally.",
+          "support": 28,
+          "idf": 3.595
+        },
+        {
+          "rx": "\\bstack\\-based\\b",
+          "w": 0.2281,
+          "token": "stack-based",
+          "support": 26,
+          "idf": 5.711
+        },
+        {
+          "rx": "\\bexecution\\b",
+          "w": 0.2214,
+          "token": "execution",
+          "support": 37,
+          "idf": 3.196
+        },
+        {
+          "rx": "\\baffected\\b",
+          "w": 0.2183,
+          "token": "affected",
+          "support": 37,
+          "idf": 3.104
+        },
+        {
+          "rx": "\\bremote\\b",
+          "w": 0.213,
+          "token": "remote",
+          "support": 34,
+          "idf": 2.778
+        },
+        {
+          "rx": "\\bservice\\b",
+          "w": 0.2035,
+          "token": "service",
+          "support": 26,
+          "idf": 3.814
+        },
+        {
+          "rx": "\\binteraction\\b",
+          "w": 0.2009,
+          "token": "interaction",
+          "support": 30,
+          "idf": 3.792
+        }
+      ],
+      "cooccur": [],
+      "negatives": [
+        {
+          "rx": "\\bprepare\\b|\\bparameterized\\b|\\bbindParam\\b",
+          "penalty": 0.2,
+          "note": "parameterized query"
+        },
+        {
+          "rx": "\\bexecFile\\b",
+          "penalty": 0.08,
+          "note": "execFile safer than exec"
+        }
+      ]
+    },
+    {
+      "id": "SIG-SQLI",
+      "title": "Auto-generated signature for sqli",
+      "group": "sqli",
+      "baseSeverity": 0.9,
+      "support_docs": 190,
+      "rules": [
+        {
+          "rx": "\\bsql\\b",
+          "w": 0.9958,
+          "token": "sql",
+          "support": 188,
+          "idf": 3.754
+        },
+        {
+          "rx": "\\bsql_injection\\b",
+          "w": 0.6507,
+          "token": "sql_injection",
+          "support": 179,
+          "idf": 3.814
+        },
+        {
+          "rx": "\\binjection\\b",
+          "w": 0.6054,
+          "token": "injection",
+          "support": 173,
+          "idf": 3.442
+        },
+        {
+          "rx": "\\bin\\b",
+          "w": 0.5284,
+          "token": "in",
+          "support": 186,
+          "idf": 1.166
+        },
+        {
+          "rx": "\\bused\\b",
+          "w": 0.4721,
+          "token": "used",
+          "support": 130,
+          "idf": 3.749
+        },
+        {
+          "rx": "\\ban\\b",
+          "w": 0.4391,
+          "token": "an",
+          "support": 148,
+          "idf": 2.024
+        },
+        {
+          "rx": "\\bthis\\b",
+          "w": 0.3884,
+          "token": "this",
+          "support": 142,
+          "idf": 1.555
+        },
+        {
+          "rx": "\\bvulnerability\\b",
+          "w": 0.3861,
+          "token": "vulnerability",
+          "support": 143,
+          "idf": 1.439
+        },
+        {
+          "rx": "\\bthrough\\b",
+          "w": 0.3814,
+          "token": "through",
+          "support": 133,
+          "idf": 1.869
+        },
+        {
+          "rx": "\\bspecial\\b",
+          "w": 0.3651,
+          "token": "special",
+          "support": 98,
+          "idf": 4.203
+        },
+        {
+          "rx": "\\belements\\b",
+          "w": 0.3632,
+          "token": "elements",
+          "support": 97,
+          "idf": 4.236
+        },
+        {
+          "rx": "\\bcommand\\b",
+          "w": 0.3458,
+          "token": "command",
+          "support": 96,
+          "idf": 3.871
+        },
+        {
+          "rx": "\\binjection\\.\\b",
+          "w": 0.3371,
+          "token": "injection.",
+          "support": 91,
+          "idf": 4.116
+        },
+        {
+          "rx": "\\bto\\b",
+          "w": 0.3353,
+          "token": "to",
+          "support": 89,
+          "idf": 1.665
+        },
+        {
+          "rx": "\\bof\\b",
+          "w": 0.3344,
+          "token": "of",
+          "support": 122,
+          "idf": 1.601
+        },
+        {
+          "rx": "\\bfrom\\b",
+          "w": 0.3327,
+          "token": "from",
+          "support": 116,
+          "idf": 1.884
+        },
+        {
+          "rx": "\\bthe\\b",
+          "w": 0.3202,
+          "token": "the",
+          "support": 81,
+          "idf": 2.008
+        },
+        {
+          "rx": "\\bneutralization\\b",
+          "w": 0.3049,
+          "token": "neutralization",
+          "support": 98,
+          "idf": 2.603
+        },
+        {
+          "rx": "\\bimproper\\b",
+          "w": 0.2981,
+          "token": "improper",
+          "support": 101,
+          "idf": 2.162
+        },
+        {
+          "rx": "\\ballows\\b",
+          "w": 0.2952,
+          "token": "allows",
+          "support": 109,
+          "idf": 1.522
+        },
+        {
+          "rx": "\\bissue\\b",
+          "w": 0.2862,
+          "token": "issue",
+          "support": 102,
+          "idf": 1.826
+        },
+        {
+          "rx": "\\baffects\\b",
+          "w": 0.2827,
+          "token": "affects",
+          "support": 99,
+          "idf": 1.951
+        },
+        {
+          "rx": "\\bvulnerable\\b",
+          "w": 0.2213,
+          "token": "vulnerable",
+          "support": 63,
+          "idf": 3.327
+        },
+        {
+          "rx": "\\bis\\b",
+          "w": 0.2119,
+          "token": "is",
+          "support": 67,
+          "idf": 2.471
+        },
+        {
+          "rx": "\\ball\\b",
+          "w": 0.2076,
+          "token": "all",
+          "support": 58,
+          "idf": 3.347
+        },
+        {
+          "rx": "\\bversions\\b",
+          "w": 0.2065,
+          "token": "versions",
+          "support": 64,
+          "idf": 2.668
+        },
+        {
+          "rx": "\\band\\b",
+          "w": 0.1967,
+          "token": "and",
+          "support": 57,
+          "idf": 2.276
+        },
+        {
+          "rx": "\\bauthenticated\\b",
+          "w": 0.1631,
+          "token": "authenticated",
+          "support": 43,
+          "idf": 3.551
+        },
+        {
+          "rx": "\\bserver\\b",
+          "w": 0.1628,
+          "token": "server",
+          "support": 38,
+          "idf": 3.913
+        },
+        {
+          "rx": "\\battacker\\b",
+          "w": 0.1481,
+          "token": "attacker",
+          "support": 45,
+          "idf": 2.372
+        }
+      ],
+      "cooccur": [
+        {
+          "all": [
+            "\\b(input|req\\.body|req\\.query|argv)\\b",
+            "\\b(exec|spawn|subprocess|child_process)\\b"
+          ],
+          "bonus": 0.15
+        }
+      ],
+      "negatives": [
+        {
+          "rx": "\\bprepare\\b|\\bparameterized\\b|\\bbindParam\\b",
+          "penalty": 0.2,
+          "note": "parameterized query"
+        },
+        {
+          "rx": "\\bexecFile\\b",
+          "penalty": 0.08,
+          "note": "execFile safer than exec"
+        }
+      ]
+    }
+  ]
+}

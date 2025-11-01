@@ -37,29 +37,36 @@ exports.activate = activate;
 exports.deactivate = deactivate;
 // src/extension.ts
 const vscode = __importStar(require("vscode"));
-const fs = __importStar(require("fs")); // [NEW] 동적 CVE DB 로딩용
-const path = __importStar(require("path")); // [NEW] 동적 CVE DB 로딩용
+const fs = __importStar(require("fs"));
+const path = __importStar(require("path"));
 /**
  * AI Approval Agent (CRAI 식 적용 + 정적 분석 기반 SF/SR/SD 산출)
  *
- * 교수님 요구사항 반영 핵심:
- *  - [중요] CVE.org JSON에서 생성된 벡터(DB)를 동적으로 로딩하여
- *    "가짜/임의"가 아닌 "실제 데이터 기반" 유사도 계산으로 CRAI를 산출.
- *  - [변경] 고정 vocab(CVE_VOCAB) 삭제. 사전투영 없이 공통키(합집합) 기반 코사인.
- *  - [Fallback] generated_cve_db.json이 없을 경우, 최소 구동을 위한 내장 시그니처 유지.
+ * 핵심:
+ *  - CVE.org JSON에서 생성된 "정규식 룰 DB(generated_cve_rules.json)" + "벡터 DB(generated_cve_db.json)"
+ *    를 동적으로 로딩하여 실제 데이터 기반 위험도(CVE) 점수를 계산.
+ *  - 고정 vocab 삭제. 사전투영 없이 키 합집합 기반 코사인(벡터)와 정규식 휴리스틱(룰 DB)을 결합.
+ *  - 룰 DB가 없으면 최소 동작 보장(벡터 Fallback).
  */
 // ─────────────────────────────────────────────────────────────────────────────
 // 0) 확장 활성화
 // ─────────────────────────────────────────────────────────────────────────────
 function activate(context) {
     console.log("AI Approval Agent is now active!");
-    // [NEW] 확장 시작 시 CVE 벡터 DB 로드 (동적 → 없으면 Fallback)
-    DYN_CVE_DB = loadGeneratedCveDb(context);
-    if (DYN_CVE_DB.length) {
-        console.log(`[CVE] Loaded generated DB: ${DYN_CVE_DB.length} signature(s)`);
+    // [NEW] 확장 시작 시 (1) 정규식 룰 DB (2) CVE 벡터 DB 로드
+    RULE_DB = loadGeneratedRuleDb(context);
+    if (RULE_DB.length) {
+        console.log(`[CVE] Loaded generated RULE DB: ${RULE_DB.length} signature(s)`);
     }
     else {
-        console.warn("[CVE] generated_cve_db.json not found. Using built-in fallback DB.");
+        console.warn("[CVE] generated_cve_rules.json not found or empty. Regex scoring will be limited.");
+    }
+    DYN_CVE_DB = loadGeneratedCveDb(context);
+    if (DYN_CVE_DB.length) {
+        console.log(`[CVE] Loaded generated VECTOR DB: ${DYN_CVE_DB.length} signature(s)`);
+    }
+    else {
+        console.warn("[CVE] generated_cve_db.json not found. Using built-in fallback vector DB.");
     }
     const provider = new ApprovalViewProvider(context);
     context.subscriptions.push(vscode.window.registerWebviewViewProvider("aiApprovalView", provider, {
@@ -69,6 +76,7 @@ function activate(context) {
         vscode.window.showInformationMessage("AI Approval Panel opened!");
     }));
 }
+let LAST_SNIPPETS = []; // 가장 최근 Ask로 생성된 코드블록 목록
 // ─────────────────────────────────────────────────────────────────────────────
 // 1) Webview Provider
 // ─────────────────────────────────────────────────────────────────────────────
@@ -91,10 +99,9 @@ class ApprovalViewProvider {
 function getCfg() {
     const cfg = vscode.workspace.getConfiguration();
     return {
-        // 코드 생성(스트리밍)용 Ollama (점수 계산엔 사용 안 함)
         endpoint: (cfg.get("aiApproval.ollama.endpoint") || "http://210.110.103.64:11434").replace(/\/$/, ""),
         model: cfg.get("aiApproval.ollama.model") || "llama3.1:8b",
-        // 최상위 FRD 가중치 (합 1 권장)
+        // FRD weights
         wF: cfg.get("aiApproval.weights.functionality") ?? 0.40,
         wR: cfg.get("aiApproval.weights.resource") ?? 0.30,
         wD: cfg.get("aiApproval.weights.dependency") ?? 0.30
@@ -106,17 +113,41 @@ function wireMessages(webview) {
         try {
             switch (msg.type) {
                 case "approve": {
-                    const { code = "", language = "plaintext", filename = null, score = null, severity = null } = msg || {};
-                    // RED 게이트: 확인문자 요구
-                    if (severity === "red") {
+                    const { mode } = msg || {};
+                    // RED gate
+                    if (msg?.severity === "red") {
                         const input = await vscode.window.showInputBox({
-                            prompt: `High risk (${score}). Type 'CONFIRM' to continue.`,
-                            validateInput: v => (v === "CONFIRM" ? null : "You must type CONFIRM to proceed.")
+                            prompt: `High risk (${msg?.score}). Type 'CONFIRM' to continue.`,
+                            validateInput: (v) => (v === "CONFIRM" ? null : "You must type CONFIRM to proceed.")
                         });
                         if (input !== "CONFIRM")
                             return;
                     }
-                    await handleApproval(code, language, filename);
+                    if (mode === "one" || mode === "all") {
+                        if (!LAST_SNIPPETS.length) {
+                            vscode.window.showWarningMessage("승인할 코드가 없습니다. 먼저 'Ask'로 코드를 생성하세요.");
+                            return;
+                        }
+                        if (mode === "one") {
+                            const index = typeof msg.index === "number" ? msg.index : -1;
+                            if (index < 0 || index >= LAST_SNIPPETS.length) {
+                                vscode.window.showErrorMessage("잘못된 코드블록 인덱스입니다.");
+                                return;
+                            }
+                            const snip = LAST_SNIPPETS[index];
+                            await handleApproval(snip.code, snip.language, snip.suggested);
+                            break;
+                        }
+                        if (mode === "all") {
+                            await handleApprovalMany(LAST_SNIPPETS);
+                            break;
+                        }
+                    }
+                    else {
+                        // 레거시: 단일 코드 승인
+                        const { code = "", language = "plaintext" } = msg || {};
+                        await handleApproval(code, language, null);
+                    }
                     break;
                 }
                 case "reject": {
@@ -130,23 +161,28 @@ function wireMessages(webview) {
                 case "ask": {
                     const { endpoint, model, wF, wR, wD } = getCfg();
                     try {
-                        // 1) (옵션) 코드 생성 스트리밍 — 점수와 무관, UI 제공용
+                        // 1) 코드 생성 스트리밍
                         const fullText = await chatWithOllamaAndReturn(endpoint, model, msg.text, (delta) => {
                             webview.postMessage({ type: "delta", text: delta });
                         });
-                        // 2) 코드블록 추출 + 파일명 힌트
-                        const snippet = extractLastCodeBlockTS(fullText);
-                        const code = snippet?.code ?? "";
-                        const language = snippet?.language ?? "plaintext";
-                        const suggested = detectSuggestedFileName(fullText, language);
-                        // 3) 정적 파이프라인 실행 → StaticMetrics
-                        const metrics = await runStaticPipeline(code, suggested, language);
-                        // 4) 정적 분석 결과 → 신호(F/R/D) → 차원 점수
-                        const heur = analyzeFromStaticMetrics(metrics, suggested);
-                        // 5) 최종 CRAI (식 2) 계산 — 0.0~10.0 스케일
+                        // 2) 전체 코드블록 추출 + 상태 저장
+                        const blocks = extractCodeBlocksTS(fullText);
+                        LAST_SNIPPETS = blocks.map((b) => ({
+                            language: b.language,
+                            code: b.code,
+                            suggested: detectSuggestedFileName(b.code, b.language)
+                        }));
+                        // 3) 대표 블록(마지막)으로 정적 파이프라인 실행
+                        const primary = LAST_SNIPPETS.length > 0
+                            ? LAST_SNIPPETS[LAST_SNIPPETS.length - 1]
+                            : { language: "plaintext", code: "", suggested: null };
+                        const globalSuggested = detectSuggestedFileName(fullText, primary.language) || primary.suggested || null;
+                        const metrics = await runStaticPipeline(primary.code, globalSuggested, primary.language);
+                        // 4) 정적 분석 → FRD → CRAI
+                        const heur = analyzeFromStaticMetrics(metrics, globalSuggested);
                         const fusedVector = heur.vector;
                         const scored = scoreFromVector(fusedVector, { wF, wR, wD });
-                        // 6) 웹뷰로 전달 (증거 포함)
+                        // 5) 웹뷰로 전달
                         webview.postMessage({
                             type: "analysis",
                             vector: fusedVector,
@@ -154,15 +190,20 @@ function wireMessages(webview) {
                             severity: scored.severity,
                             level: scored.level,
                             weights: scored.weights,
-                            suggestedFilename: suggested || null,
-                            language,
-                            code,
+                            suggestedFilename: globalSuggested || null,
+                            language: primary.language,
+                            code: primary.code,
                             reasons: heur.reasons,
                             crai_components: scored.crai_components,
                             signalTable: heur.signalTable,
-                            breakdown: {
-                                heurOnly: { vector: heur.vector, ...scored }
-                            }
+                            breakdown: { heurOnly: { vector: heur.vector, ...scored } },
+                            blocks: LAST_SNIPPETS.map((b, i) => ({
+                                index: i,
+                                language: b.language,
+                                suggested: b.suggested || null,
+                                preview: (b.code || "").split(/\r?\n/, 2).join("\n"),
+                                length: b.code.length
+                            }))
                         });
                         webview.postMessage({ type: "done" });
                     }
@@ -234,18 +275,35 @@ async function chatWithOllamaAndReturn(endpoint, model, userText, onDelta) {
     }
     return full;
 }
-/** [NEW] 동적으로 로드된 벡터 DB (generated_cve_db.json) */
-let DYN_CVE_DB = [];
-/** [NEW] generated_cve_db.json 로드 함수 */
+/** 동적 로드된 DB들 */
+let RULE_DB = []; // generated_cve_rules.json
+let DYN_CVE_DB = []; // generated_cve_db.json (없으면 fallback 사용)
+/** generated_cve_rules.json 로드 함수 */
+function loadGeneratedRuleDb(ctx) {
+    try {
+        const base = ctx ? ctx.extensionUri.fsPath : process.cwd();
+        const p = path.join(base, "cve_data", "generated_cve_rules.json");
+        if (!fs.existsSync(p))
+            return [];
+        const raw = fs.readFileSync(p, "utf8");
+        const obj = JSON.parse(raw);
+        const arr = obj?.signatures;
+        return Array.isArray(arr) ? arr : [];
+    }
+    catch (e) {
+        console.error("[CVE] loadGeneratedRuleDb error:", e);
+        return [];
+    }
+}
+/** generated_cve_db.json 로드 함수 (벡터) */
 function loadGeneratedCveDb(ctx) {
     try {
         const base = ctx ? ctx.extensionUri.fsPath : process.cwd();
-        const p = path.join(base, "cve_data", "generated_cve_db.json"); // scripts/build_cve_vocab.ts 출력 경로
+        const p = path.join(base, "cve_data", "generated_cve_db.json");
         if (!fs.existsSync(p))
             return [];
         const raw = fs.readFileSync(p, "utf8");
         const arr = JSON.parse(raw);
-        // sanity check
         return Array.isArray(arr) ? arr : [];
     }
     catch (e) {
@@ -253,19 +311,42 @@ function loadGeneratedCveDb(ctx) {
         return [];
     }
 }
-/** [KEEP] 내장 Fallback DB (최소 동작 보장). 실제 분석은 DYN_CVE_DB 우선. */
+/** 내장 Fallback 벡터 DB (최소 동작 보장) */
 const FALLBACK_CVE_VECTOR_DB = [
     {
         id: "SIG-CMD-INJECT",
         title: "Command Injection via shell/exec",
         baseSeverity: 0.95,
-        tokens: { exec: 1.5, spawn: 1.3, shell: 1.2, system: 1.4, popen: 1.4, "child_process": 1.6, bash: 1.0, sh: 1.0, userinput: 0.8, "stringConcat": 0.8 }
+        tokens: {
+            exec: 1.5,
+            spawn: 1.3,
+            shell: 1.2,
+            system: 1.4,
+            popen: 1.4,
+            "child_process": 1.6,
+            bash: 1.0,
+            sh: 1.0,
+            userinput: 0.8,
+            "stringConcat": 0.8
+        }
     },
     {
         id: "SIG-SQLI-CONCAT",
         title: "SQL Injection via string concatenation",
         baseSeverity: 0.90,
-        tokens: { select: 1.2, insert: 1.2, update: 1.2, delete: 1.2, where: 1.0, from: 0.8, concat: 1.2, format: 0.8, fstring: 0.8, userinput: 0.8, query: 1.0 }
+        tokens: {
+            select: 1.2,
+            insert: 1.2,
+            update: 1.2,
+            delete: 1.2,
+            where: 1.0,
+            from: 0.8,
+            concat: 1.2,
+            format: 0.8,
+            fstring: 0.8,
+            userinput: 0.8,
+            query: 1.0
+        }
     },
     {
         id: "SIG-DESERIALIZE-RCE",
@@ -292,13 +373,11 @@ const FALLBACK_CVE_VECTOR_DB = [
         tokens: { vulnerable_pkg_2023: 2.0 }
     }
 ];
-/** [NEW] 실제로 사용할 DB 선택 (동적 우선, 없으면 Fallback) */
+/** 실제 사용할 벡터 DB 선택 */
 function getSigDB() {
-    return (DYN_CVE_DB && DYN_CVE_DB.length) ? DYN_CVE_DB : FALLBACK_CVE_VECTOR_DB;
+    return DYN_CVE_DB && DYN_CVE_DB.length ? DYN_CVE_DB : FALLBACK_CVE_VECTOR_DB;
 }
-/** 코드 문자열 → 토큰 벡터(가중치 포함)
- *  (NOTE) 이 부분은 예전과 동일. 코드에서 의미 토큰을 추출한다.
- */
+/** 코드 문자열 → 토큰 벡터(가중치 포함) */
 function vectorizeCodeToTokens(code) {
     const lower = code.toLowerCase();
     const features = {};
@@ -312,8 +391,10 @@ function vectorizeCodeToTokens(code) {
     if (/("|'|`)\s*\+\s*\w|\w\s*\+\s*("|'|`)/.test(code))
         add("stringConcat", 1);
     // SQL
-    ["select", "insert", "update", "delete", "where", "from", "union", "concat"].forEach(k => { if (wordSet.has(k))
-        add(k, 1); });
+    ["select", "insert", "update", "delete", "where", "from", "union", "concat"].forEach((k) => {
+        if (wordSet.has(k))
+            add(k, 1);
+    });
     if (/\bfstring\b|`.*\${.*}`/.test(lower))
         add("fstring", 1);
     if (/\.format\(/.test(lower))
@@ -358,10 +439,7 @@ function vectorizeCodeToTokens(code) {
         add("vulnerable_pkg_2023", 2);
     return features;
 }
-/** 코사인 유사도 (공통키 합집합 기반)
- *  (NOTE) 예전엔 고정 vocab으로 투영 후 비교 → 삭제.
- *  객체 키의 합집합을 돌며 내적/노름을 계산하므로 자동 정렬된다.
- */
+/** 코사인 유사도 (공통키 합집합 기반) */
 function cosineSim(a, b) {
     let dot = 0, na = 0, nb = 0;
     const keys = new Set([...Object.keys(a), ...Object.keys(b)]);
@@ -380,24 +458,108 @@ function cosineSim(a, b) {
 function vectorCveScan(code) {
     const codeVec = vectorizeCodeToTokens(code);
     const DB = getSigDB();
-    const results = DB.map(sig => {
-        // [중요] 투영 없이 그대로 비교 (키 합집합 기반 코사인)
+    const results = DB.map((sig) => {
         const sim = cosineSim(codeVec, sig.tokens);
-        // 유사도 기반 가중 severity: sig.baseSeverity * smooth(sim)
         const sev = sig.baseSeverity * Math.min(1, Math.pow(Math.max(0, sim), 0.8) * 1.2);
         return { id: sig.id, title: sig.title, similarity: sim, severity01: sev, notes: sig.notes ?? "" };
     }).sort((a, b) => b.severity01 - a.severity01);
-    // 집계: top-k(3) 결합 1-Π(1-sev_i)
     const topK = results.slice(0, 3);
     let agg = 0;
     for (const r of topK)
         agg = 1 - (1 - agg) * (1 - r.severity01);
-    return { aggregatedSeverity01: Math.min(1, agg), matches: results.filter(r => r.similarity > 0.15).slice(0, 5) };
+    return { aggregatedSeverity01: Math.min(1, agg), matches: results.filter((r) => r.similarity > 0.15).slice(0, 5) };
+}
+/** 정규식 룰 DB 기반 CVE 휴리스틱 점수 (하드코딩 룰 제거, DB 기반) */
+function regexHeuristicScoreFromDB(code, db) {
+    const lower = code.toLowerCase();
+    const lines = lower.split(/\r?\n/);
+    const compile = (rx) => new RegExp(rx, "i");
+    const results = db.map((sig) => {
+        let raw = 0;
+        const matched = [];
+        // 1) 룰 매칭
+        for (const r of sig.rules || []) {
+            try {
+                const re = compile(r.rx);
+                if (re.test(lower)) {
+                    raw += r.w || 0;
+                    matched.push(r.token || r.rx);
+                }
+            }
+            catch {
+                // 정규식 오류는 무시 (룰 생성기 튜닝 필요)
+            }
+        }
+        // 2) 동시출현 보너스
+        sig.cooccur?.forEach((c) => {
+            const ok = (c.all || []).every((rx) => {
+                try {
+                    return compile(rx).test(lower);
+                }
+                catch {
+                    return false;
+                }
+            });
+            if (ok)
+                raw += c.bonus || 0;
+        });
+        // 3) 근접 보너스 
+        sig.proximity?.forEach((p) => {
+            try {
+                const A = compile(p.a), B = compile(p.b);
+                const L = p.lines ?? 5;
+                const aIdx = lines.findIndex((ln) => A.test(ln));
+                if (aIdx >= 0) {
+                    for (let d = -L; d <= L; d++) {
+                        const j = aIdx + d;
+                        if (j >= 0 && j < lines.length && B.test(lines[j])) {
+                            raw += p.bonus || 0;
+                            break;
+                        }
+                    }
+                }
+            }
+            catch { /* ignore */ }
+        });
+        // 4) 네거티브(안전 API) 패널티
+        sig.negatives?.forEach((n) => {
+            try {
+                const re = compile(n.rx);
+                if (re.test(lower))
+                    raw -= n.penalty || 0;
+            }
+            catch { /* ignore */ }
+        });
+        // 5) BaseSeverity와 결합 (로지스틱 스케일)
+        const sev = (sig.baseSeverity ?? 0.7) * (1 - Math.exp(-3 * Math.max(0, raw)));
+        return {
+            id: sig.id,
+            title: sig.title,
+            severity01: Math.min(1, sev),
+            matched,
+            raw: Math.max(0, Number(raw.toFixed(3)))
+        };
+    }).sort((a, b) => b.severity01 - a.severity01);
+    // 상위 3개 결합
+    const topK = results.slice(0, 3);
+    let agg = 0;
+    for (const r of topK)
+        agg = 1 - (1 - agg) * (1 - r.severity01);
+    return {
+        severity01: Math.min(1, agg),
+        matches: results.filter((r) => r.severity01 > 0.15).slice(0, 5)
+    };
 }
 const clamp01 = (x) => Math.max(0, Math.min(1, x));
 function mapBigOTo01(bigO) {
     const lut = {
-        "O(1)": 0.05, "O(log n)": 0.15, "O(n)": 0.20, "O(n log n)": 0.35, "O(n^2)": 0.70, "O(n^3)": 0.90, "unknown": 0.50
+        "O(1)": 0.05,
+        "O(log n)": 0.15,
+        "O(n)": 0.20,
+        "O(n log n)": 0.35,
+        "O(n^2)": 0.70,
+        "O(n^3)": 0.90,
+        "unknown": 0.50
     };
     return lut[bigO] ?? 0.50;
 }
@@ -421,28 +583,32 @@ function preciseResourceAndSecurityScan(code) {
     // 정규표현식 폭발 가능성
     const regexDosHint = /(a+)+|(\.\*){2,}|(.*){2,}/.test(code) && /(re\.compile|new\s+RegExp)/.test(code);
     // 외부 호출/IO
-    const externalCalls = (code.match(/\b(fetch|axios|request|http\.|https\.|jdbc|mongo|redis|sequelize|prisma)\b/gi) || []).length;
-    const ioCalls = (code.match(/\bfs\.(read|write|append|unlink|readdir|chmod|chown)|open\(|readFileSync|writeFileSync\b/gi) || []).length;
+    const externalCalls = (code.match(/\b(fetch|axios|request|http\.|https\.|jdbc|mongo|redis|sequelize|prisma)\b/gi) || [])
+        .length;
+    const ioCalls = (code.match(/\bfs\.(read|write|append|unlink|readdir|chmod|chown)|open\(|readFileSync|writeFileSync\b/gi) || [])
+        .length;
     // 메모리 바이트 근사
     let memBytesApprox = 0;
     const inc = (n) => { memBytesApprox += Math.max(0, n); };
-    // Buffer.alloc(N)
     const bufAlloc = [...code.matchAll(/Buffer\.alloc\s*\(\s*(\d+)\s*\)/gi)];
-    bufAlloc.forEach(m => inc(parseInt(m[1], 10)));
-    // new Array(N) / Array(N).fill(K)
+    bufAlloc.forEach((m) => inc(parseInt(m[1], 10)));
     const arrAlloc = [...code.matchAll(/\bnew\s+Array\s*\(\s*(\d+)\s*\)|\bArray\s*\(\s*(\d+)\s*\)\.fill/gi)];
-    arrAlloc.forEach(m => inc(((parseInt(m[1] || m[2], 10) || 0) * 8)));
-    // 문자열/객체/배열 리터럴 크기 근사
+    arrAlloc.forEach((m) => inc((parseInt(m[1] || m[2], 10) || 0) * 8));
     const strLits = [...code.matchAll(/(["'`])([^"'`\\]|\\.){1,200}\1/g)];
-    strLits.forEach(m => inc((m[0]?.length || 0)));
+    strLits.forEach((m) => inc(m[0]?.length || 0));
     const arrayLits = [...code.matchAll(/\[([^\[\]]{0,400})\]/g)];
-    arrayLits.forEach(m => { const elems = (m[1].split(",").length) || 0; inc(elems * 16); });
+    arrayLits.forEach((m) => {
+        const elems = m[1].split(",").length || 0;
+        inc(elems * 16);
+    });
     const objectLits = [...code.matchAll(/\{([^{}]{0,400})\}/g)];
-    objectLits.forEach(m => { const props = (m[1].match(/:/g) || []).length; inc(props * 24); });
-    // 컬렉션(Map/Set)
+    objectLits.forEach((m) => {
+        const props = (m[1].match(/:/g) || []).length;
+        inc(props * 24);
+    });
     const mapSet = (code.match(/\bnew\s+(Map|Set)\s*\(/g) || []).length;
     inc(mapSet * 128);
-    // 명령 실행/권한 위험
+    // 권한/민감도
     let permRisk = 0;
     if (/\b(child_process|exec\(|spawn\(|system\(|popen\(|subprocess\.)/i.test(code))
         permRisk += 0.4;
@@ -451,7 +617,7 @@ function preciseResourceAndSecurityScan(code) {
     if (/\bprocess\.env\b|secret|password|credential/i.test(lower))
         permRisk += 0.3;
     permRisk = clamp01(permRisk);
-    // lib reputation (기본 0.65, 취약패키지 사용시 하향)
+    // 라이브러리 평판 (예시)
     let libRep = 0.65;
     if (/vulnerable[_-]?pkg[_-]?2023/.test(lower))
         libRep = Math.min(libRep, 0.1);
@@ -467,17 +633,16 @@ function preciseResourceAndSecurityScan(code) {
         bigO = "O(n)";
     else
         bigO = "unknown";
-    // 메모리/호출 카운트
-    const memAllocs = (bufAlloc.length + arrAlloc.length + arrayLits.length + objectLits.length + mapSet);
-    // CVE: 룰 + 벡터화 결합
-    const regexRules = evaluateCveFromCodeRegex(code);
+    // CVE: 정규식 룰(DB) + 벡터 결합
+    const regexRules = regexHeuristicScoreFromDB(code, RULE_DB);
     const vectorRules = vectorCveScan(code);
     const cveSeverity01 = clamp01(1 - (1 - regexRules.severity01) * (1 - vectorRules.aggregatedSeverity01));
-    // 이유 채우기 (증거 표시용)
-    if (regexRules.hints.length)
-        reasons.push(...regexRules.hints.map(h => `regex:${h}`));
+    // 이유
+    if (regexRules.matches.length) {
+        reasons.push(...regexRules.matches.map((m) => `regex:${m.id} sev=${m.severity01.toFixed(2)}`));
+    }
     if (vectorRules.matches.length) {
-        reasons.push(...vectorRules.matches.map(m => `vector:${m.id} sim=${m.similarity.toFixed(2)} sev=${m.severity01.toFixed(2)}`));
+        reasons.push(...vectorRules.matches.map((m) => `vector:${m.id} sim=${m.similarity.toFixed(2)} sev=${m.severity01.toFixed(2)}`));
     }
     if (regexDosHint)
         reasons.push("ReDoS pattern suspected");
@@ -494,7 +659,7 @@ function preciseResourceAndSecurityScan(code) {
         divideAndConquerHint,
         sortHint,
         regexDosHint,
-        memAllocs,
+        memAllocs: bufAlloc.length + arrAlloc.length + arrayLits.length + objectLits.length + mapSet,
         memBytesApprox,
         externalCalls,
         ioCalls,
@@ -504,24 +669,6 @@ function preciseResourceAndSecurityScan(code) {
         permRisk01: permRisk,
         _reasons: reasons
     };
-}
-/* ---------- 정규식 기반 CVE 룰 ---------- */
-function evaluateCveFromCodeRegex(code) {
-    const rules = [
-        { id: "CVE-CMD-EXEC", rx: /\b(os\.system|subprocess\.(Popen|call|run)|child_process\.(exec|spawn)|Runtime\.getRuntime\(\)\.exec|system\()/i, sev: 0.95, hint: "command execution" },
-        { id: "CVE-SQLI-CONCAT", rx: /\b(SELECT|INSERT|UPDATE|DELETE)\b[\s\S]{0,200}\b(user|username|name|pwd|password)\b[\s\S]{0,60}("|'|`|\)|\})?\s*(\+|%s|format\(|f")/i, sev: 0.90, hint: "sql concat" },
-        { id: "CVE-PLAINTEXT-PWD", rx: /\b(mysql\.user|INSERT\s+INTO\s+mysql\.user|password\s*[:=]\s*["'`][^"'`]{1,64}["'`])/i, sev: 0.85, hint: "plaintext password" },
-        { id: "CVE-VULN-PKG", rx: /\b(import|require)\s+.*vulnerable[_-]?pkg[_-]?2023\b/i, sev: 0.90, hint: "vulnerable package" }
-    ];
-    let sevAgg = 0;
-    const hints = [];
-    for (const r of rules) {
-        if (r.rx.test(code)) {
-            sevAgg = 1 - (1 - sevAgg) * (1 - r.sev);
-            hints.push(r.hint);
-        }
-    }
-    return { severity01: clamp01(sevAgg), hints };
 }
 /* ---------- 정적 파이프라인 실행 ---------- */
 async function runStaticPipeline(code, filename, _language) {
@@ -596,21 +743,27 @@ function analyzeFromStaticMetrics(metrics, filename) {
     const D = computeDSignalsFromMetrics(metrics);
     const vector = [F, R, D];
     const signalTable = {
-        F: { apiRatio: clamp01(metrics.apiChanges / Math.max(1, metrics.totalApis)),
+        F: {
+            apiRatio: clamp01(metrics.apiChanges / Math.max(1, metrics.totalApis)),
             coreModuleModified: metrics.coreTouched ? 1 : 0,
             diffLineRatio: clamp01(metrics.diffChangedLines / Math.max(1, metrics.totalLines)),
-            schemaChanged: metrics.schemaChanged ? 1 : 0 },
-        R: { timeComplexity: mapBigOTo01(metrics.bigO),
+            schemaChanged: metrics.schemaChanged ? 1 : 0
+        },
+        R: {
+            timeComplexity: mapBigOTo01(metrics.bigO),
             cyclomaticComplexity: metrics.cc,
             loopDepthApprox: metrics.loopDepthApprox,
             memBytesApprox: metrics.memBytesApprox,
             memNorm: clamp01(0.7 * (Math.log2(Math.max(1, metrics.memBytesApprox)) / 24) + 0.3 * (1 - Math.exp(-0.06 * metrics.memAllocs))),
             externalCallNorm: clamp01(1 - Math.exp(-0.05 * metrics.externalCalls)),
-            ioCallNorm: clamp01(1 - Math.exp(-0.06 * metrics.ioCalls)) },
-        D: { cveSeverity: metrics.cveSeverity01,
+            ioCallNorm: clamp01(1 - Math.exp(-0.06 * metrics.ioCalls))
+        },
+        D: {
+            cveSeverity: metrics.cveSeverity01,
             libReputation: metrics.libReputation01,
             licenseMismatch: metrics.licenseMismatch ? 1 : 0,
-            sensitivePerm: metrics.permRisk01 }
+            sensitivePerm: metrics.permRisk01
+        }
     };
     return { vector, filename, signalTable, reasons: metrics._reasons };
 }
@@ -648,7 +801,11 @@ function scoreFromVector(v, top) {
         action = "Standard review process";
     }
     return {
-        score, severity, level, action, weights: cfg,
+        score,
+        severity,
+        level,
+        action,
+        weights: cfg,
         crai_components: { B, C, alpha, rho, s, SF, SR, SD, mixFR }
     };
 }
@@ -682,8 +839,47 @@ function detectSuggestedFileName(fullText, _fallbackLang) {
         return null;
     return last.replace(/^\/+/, "");
 }
+/** 마지막 코드블록 추출 (```lang\ncode```) — (레거시 호환용) */
+function extractLastCodeBlockTS(text) {
+    const regex = /```([\s\S]*?)```/g;
+    let match;
+    let last = null;
+    while ((match = regex.exec(text)) !== null)
+        last = match[1];
+    if (!last)
+        return null;
+    const nl = last.indexOf("\n");
+    if (nl > -1) {
+        const maybeLang = last.slice(0, nl).trim();
+        const body = last.slice(nl + 1);
+        if (/^[a-zA-Z0-9+#._-]{0,20}$/.test(maybeLang)) {
+            return { language: maybeLang || "plaintext", code: body };
+        }
+    }
+    return { language: "plaintext", code: last };
+}
+/** 전체 코드블록 배열 추출 (```lang\ncode```) */
+function extractCodeBlocksTS(text) {
+    const blocks = [];
+    const regex = /```([\s\S]*?)```/g;
+    let match;
+    while ((match = regex.exec(text)) !== null) {
+        const body = match[1] ?? "";
+        const nl = body.indexOf("\n");
+        if (nl > -1) {
+            const maybeLang = body.slice(0, nl).trim();
+            const code = body.slice(nl + 1);
+            const language = /^[a-zA-Z0-9+#._-]{0,20}$/.test(maybeLang) && maybeLang ? maybeLang : "plaintext";
+            blocks.push({ language, code, suggested: detectSuggestedFileName(code, language) });
+        }
+        else {
+            blocks.push({ language: "plaintext", code: body, suggested: null });
+        }
+    }
+    return blocks;
+}
 /* ======================================================================
- *  승인 후 코드 적용
+ *  승인 후 코드 적용 (단일/여러 스니펫)
  * ==================================================================== */
 async function handleApproval(code, language, suggested) {
     if (!vscode.workspace.workspaceFolders?.length) {
@@ -703,7 +899,7 @@ async function handleApproval(code, language, suggested) {
         /\bcurl\b.*\|\s*sh\b/i
     ];
     if (looksLikeShell) {
-        if (denylist.some(rx => rx.test(code))) {
+        if (denylist.some((rx) => rx.test(code))) {
             vscode.window.showErrorMessage("위험 명령이 감지되어 실행을 차단했습니다.");
             return;
         }
@@ -711,11 +907,11 @@ async function handleApproval(code, language, suggested) {
         if (confirm !== "실행")
             return;
         const termName = "AI Approval Agent";
-        let terminal = vscode.window.terminals.find(t => t.name === termName);
+        let terminal = vscode.window.terminals.find((t) => t.name === termName);
         if (!terminal)
             terminal = vscode.window.createTerminal({ name: termName });
         terminal.show(true);
-        const lines = code.split(/\r?\n/).map(l => l.trim()).filter(l => l && !l.startsWith("#"));
+        const lines = code.split(/\r?\n/).map((l) => l.trim()).filter((l) => l && !l.startsWith("#"));
         for (const line of lines)
             terminal.sendText(line, true);
         vscode.window.showInformationMessage(`터미널에서 ${lines.length}개 명령을 실행했습니다.`);
@@ -750,6 +946,62 @@ async function handleApproval(code, language, suggested) {
     vscode.window.showInformationMessage(`승인됨 → ${targetRel} 저장 완료`);
     const doc = await vscode.workspace.openTextDocument(fileUri);
     await vscode.window.showTextDocument(doc);
+}
+/** 여러 스니펫 일괄 승인 */
+async function handleApprovalMany(snippets) {
+    if (!vscode.workspace.workspaceFolders?.length) {
+        vscode.window.showErrorMessage("워크스페이스가 열려 있지 않습니다.");
+        return;
+    }
+    if (!snippets.length)
+        return;
+    const choice = await vscode.window.showQuickPick([
+        { label: "Save each as new file", description: "각 블록을 개별 새 파일로 저장" },
+        { label: "Insert concatenated", description: "활성 에디터 커서 위치에 모두 이어붙여 삽입" },
+        { label: "Create folder & save", description: "하위 폴더를 만들고 파일별로 저장" }
+    ], { placeHolder: "여러 코드블록을 어떻게 적용할까요?" });
+    if (!choice)
+        return;
+    const root = vscode.workspace.workspaceFolders[0].uri;
+    if (choice.label === "Insert concatenated") {
+        const editor = vscode.window.activeTextEditor;
+        if (!editor) {
+            vscode.window.showErrorMessage("활성 에디터가 없습니다.");
+            return;
+        }
+        const joined = snippets.map((s) => s.code).join("\n\n");
+        await editor.edit((eb) => eb.insert(editor.selection.active, joined));
+        vscode.window.showInformationMessage(`총 ${snippets.length}개 블록을 현재 문서에 삽입했습니다.`);
+        return;
+    }
+    if (choice.label === "Save each as new file") {
+        for (const s of snippets) {
+            const ext = guessExtension(s.language);
+            const targetRel = sanitizeRelativePath(s.suggested) || (await nextAutoName(root, ext));
+            await ensureParentDir(root, targetRel);
+            const fileUri = vscode.Uri.joinPath(root, targetRel);
+            await vscode.workspace.fs.writeFile(fileUri, new TextEncoder().encode(s.code));
+        }
+        vscode.window.showInformationMessage(`총 ${snippets.length}개 블록을 개별 파일로 저장했습니다.`);
+        return;
+    }
+    if (choice.label === "Create folder & save") {
+        const folderName = `generated_${Date.now()}`;
+        const folderUri = vscode.Uri.joinPath(root, folderName);
+        await vscode.workspace.fs.createDirectory(folderUri);
+        for (let i = 0; i < snippets.length; i++) {
+            const s = snippets[i];
+            const ext = guessExtension(s.language);
+            const base = s.suggested && sanitizeRelativePath(s.suggested)
+                ? sanitizeRelativePath(s.suggested)
+                : `snippet_${String(i + 1).padStart(2, "0")}.${ext}`;
+            const rel = base.includes("/") ? base.split("/").pop() : base;
+            const fileUri = vscode.Uri.joinPath(folderUri, rel);
+            await vscode.workspace.fs.writeFile(fileUri, new TextEncoder().encode(s.code));
+        }
+        vscode.window.showInformationMessage(`폴더 ${folderName} 아래에 ${snippets.length}개 파일을 저장했습니다.`);
+        return;
+    }
 }
 /* --- 활성 에디터 전체 덮어쓰기 --- */
 async function overwriteActiveEditor(code) {
@@ -788,10 +1040,21 @@ async function insertAtCursor(code) {
 /* ---------- Fs utils ---------- */
 function guessExtension(language) {
     const map = {
-        javascript: "js", typescript: "ts", python: "py",
-        html: "html", css: "css", java: "java",
-        c: "c", cpp: "cpp", tsx: "tsx", jsx: "jsx",
-        json: "json", plaintext: "txt", bash: "sh", sh: "sh", kotlin: "kt"
+        javascript: "js",
+        typescript: "ts",
+        python: "py",
+        html: "html",
+        css: "css",
+        java: "java",
+        c: "c",
+        cpp: "cpp",
+        tsx: "tsx",
+        jsx: "jsx",
+        json: "json",
+        plaintext: "txt",
+        bash: "sh",
+        sh: "sh",
+        kotlin: "kt"
     };
     const key = (language || "").toLowerCase().trim();
     return map[key] || (key.match(/^[a-z0-9]+$/) ? key : "txt");
@@ -944,25 +1207,6 @@ function getHtml(webview, ctx, nonce) {
 function getNonce() {
     const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
     return Array.from({ length: 32 }, () => chars[Math.floor(Math.random() * chars.length)]).join("");
-}
-/** 마지막 코드블록 추출 (```lang\ncode```) — Extension Host 런타임용 */
-function extractLastCodeBlockTS(text) {
-    const regex = /```([\s\S]*?)```/g;
-    let match;
-    let last = null;
-    while ((match = regex.exec(text)) !== null)
-        last = match[1];
-    if (!last)
-        return null;
-    const nl = last.indexOf("\n");
-    if (nl > -1) {
-        const maybeLang = last.slice(0, nl).trim();
-        const body = last.slice(nl + 1);
-        if (/^[a-zA-Z0-9+#._-]{0,20}$/.test(maybeLang)) {
-            return { language: maybeLang || "plaintext", code: body };
-        }
-    }
-    return { language: "plaintext", code: last };
 }
 function deactivate() { }
 //# sourceMappingURL=extension.js.map

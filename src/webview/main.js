@@ -9,13 +9,16 @@ const input = document.getElementById("prompt");
 // 대화 히스토리 (모델 맥락 유지를 위해 확장으로 함께 전송)
 const history = []; // [{ role: "user" | "assistant", content: string }]
 
+// 마지막 응답에서 추출한 코드블록 캐시
+let lastBlocks = []; // [{language, code, filename|null}]
+
 // 안전 가드
 if (!chat || !form || !input) {
   console.error("webview DOM not ready: missing #chat/#composer/#prompt");
 }
 
 /* ─────────────────────────────────────────────────────────────────────────────
- * ① 채팅/카드 스타일 주입 (모달/디테일/분해점수 UI 전부 제거)
+ * ① 채팅/카드 스타일 주입
  * ────────────────────────────────────────────────────────────────────────────*/
 (function injectChatStyles() {
   const css = `
@@ -54,8 +57,8 @@ if (!chat || !form || !input) {
 .msg.bot .md .copy{ position:absolute; top:8px; right:8px; font-size:11px;
   padding:4px 6px; border-radius:6px; background:#2e2e2e; color:#ddd; border:1px solid #555; cursor:pointer;}
 
-/* 승인 카드 (요약 전용 UI) */
-.approval-card {
+/* 승인 카드 */
+.approval-card, .summary-card {
   border: 1px solid var(--vscode-editorWidget-border, #555);
   border-radius: 12px;
   margin: 10px 0;
@@ -63,7 +66,7 @@ if (!chat || !form || !input) {
   background: var(--vscode-editorWidget-background, #1e1e1e);
   color: var(--vscode-editor-foreground, #ddd);
 }
-.approval-card .badge {
+.approval-card .badge, .summary-card .badge {
   float: right;
   font-size: 11px;
   padding: 4px 6px;
@@ -74,7 +77,7 @@ if (!chat || !form || !input) {
   font-weight: bold;
   color: #eee;
 }
-.approval-card .card-main { clear: both; }
+.approval-card .card-main, .summary-card .card-main { clear: both; }
 
 pre.code-preview {
   background: var(--vscode-editor-background, #1e1e1e);
@@ -103,12 +106,13 @@ pre.code-preview {
 .reasons { font-size:12px; color:#bbb; margin:6px 0 10px; line-height:1.35; }
 .reasons code { background:rgba(255,255,255,0.08); border-radius:4px; padding:1px 4px; }
 
-.approval-card .actions { margin-top:10px; display:flex; gap:8px; }
-.approval-card button { padding:6px 12px; border-radius:6px; border:none; cursor:pointer; font-size:13px; }
-.approval-card button.approve-btn { background:#0e639c; color:white; }
-.approval-card button.reject-btn { background:#333; color:#ddd; }
+.actions { margin-top:10px; display:flex; gap:8px; flex-wrap:wrap; }
+button.action { padding:6px 12px; border-radius:6px; border:none; cursor:pointer; font-size:13px; }
+button.approve-btn { background:#0e639c; color:white; }
+button.reject-btn { background:#333; color:#ddd; }
+button.approve-all { background:#198754; color:white; }
 
-.approval-card button:focus-visible {
+.approval-card button:focus-visible, .summary-card button:focus-visible {
   outline:2px solid #66afe9;
   outline-offset:2px;
 }
@@ -158,23 +162,24 @@ function append(role, text) {
   chat.scrollTop = chat.scrollHeight;
 }
 
-// 마지막 코드블록 추출 ( ```lang\ncode``` )
-function extractLastCodeBlock(text) {
+// 전체 코드블록 추출 ( ```lang\ncode``` )
+function extractAllCodeBlocks(text) {
+  const blocks = [];
   const regex = /```([\s\S]*?)```/g;
   let match;
-  let last = null;
-  while ((match = regex.exec(text)) !== null) last = match[1];
-  if (!last) return null;
-
-  const nl = last.indexOf("\n");
-  if (nl > -1) {
-    const maybeLang = last.slice(0, nl).trim();
-    const body = last.slice(nl + 1);
-    if (/^[a-zA-Z0-9+#._-]{0,20}$/.test(maybeLang)) {
-      return { language: maybeLang || "plaintext", code: body };
+  while ((match = regex.exec(text)) !== null) {
+    const body = match[1] ?? "";
+    const nl = body.indexOf("\n");
+    if (nl > -1) {
+      const maybeLang = body.slice(0, nl).trim();
+      const code = body.slice(nl + 1);
+      const language = /^[a-zA-Z0-9+#._-]{0,20}$/.test(maybeLang) && maybeLang ? maybeLang : "plaintext";
+      blocks.push({ language, code });
+    } else {
+      blocks.push({ language: "plaintext", code: body });
     }
   }
-  return { language: "plaintext", code: last };
+  return blocks;
 }
 
 /* 파일명 힌트 추출 */
@@ -204,7 +209,7 @@ function toScore10(score) {
   return Math.round(Math.max(0, Math.min(10, s)) * 10) / 10;
 }
 
-/* 레벨별 권장 액션 */
+/* 레벨 → 권장 액션/색상 */
 function actionFromLevel(level) {
   switch (level) {
     case "CRITICAL": return "Comprehensive audit needed";
@@ -213,8 +218,6 @@ function actionFromLevel(level) {
     default:         return "Quick scan sufficient";
   }
 }
-
-/* CRAI 표준 경계 */
 function labelFromScore10(s10) {
   if (s10 >= 9.0) return { key: "RED", level: "CRITICAL", severity: "red", action: actionFromLevel("CRITICAL") };
   if (s10 >= 7.0) return { key: "ORANGE", level: "HIGH", severity: "orange", action: actionFromLevel("HIGH") };
@@ -222,26 +225,22 @@ function labelFromScore10(s10) {
   return { key: "GREEN", level: "LOW", severity: "green", action: actionFromLevel("LOW") };
 }
 
-/* ─────────────────────────────────────────────────────────────────────────────
- * ③ 승인 카드 렌더링
- * ────────────────────────────────────────────────────────────────────────────*/
-function renderApprovalCard(snippet, analysis) {
-  const { language, code } = snippet;
-  const filename = snippet.filename || null;
+function toFixedOrDash(v, n=2){
+  const x = Number(v);
+  return isFinite(x) ? x.toFixed(n) : "—";
+}
 
-  // 점수/등급 계산
-  const scoreRaw = typeof analysis?.score === "number" ? analysis.score : 0;
-  const score10 = typeof analysis?.score10 === "number" ? analysis.score10 : toScore10(scoreRaw);
+/* ─────────────────────────────────────────────────────────────────────────────
+ * ③ 승인 카드 렌더링 (개별/요약)
+ * ────────────────────────────────────────────────────────────────────────────*/
+function renderSummaryCard(analysis, blocksCount) {
+  const score10 = typeof analysis?.score10 === "number" ? analysis.score10 : toScore10(analysis?.score);
   const label = (analysis?.level && analysis?.severity)
-    ? {
-        key: analysis.level === "CRITICAL" ? "RED" : analysis.level === "HIGH" ? "ORANGE" : analysis.level === "MEDIUM" ? "YELLOW" : "GREEN",
-        level: analysis.level,
-        severity: analysis.severity,
-        action: actionFromLevel(analysis.level)
-      }
+    ? { key: analysis.level === "CRITICAL" ? "RED" : analysis.level === "HIGH" ? "ORANGE" : analysis.level === "MEDIUM" ? "YELLOW" : "GREEN",
+        level: analysis.level, severity: analysis.severity, action: actionFromLevel(analysis.level) }
     : labelFromScore10(score10);
 
-  // [F,R,D] 0..1
+  const comp = analysis?.crai_components || null;
   const vector = Array.isArray(analysis?.vector) ? analysis.vector : null;
   const clamp01 = (x) => Math.max(0, Math.min(1, Number(x) || 0));
   const fmtPct = (x) => Math.round(clamp01(x) * 100);
@@ -249,59 +248,70 @@ function renderApprovalCard(snippet, analysis) {
   const R = vector ? fmtPct(vector[1]) : null;
   const D = vector ? fmtPct(vector[2]) : null;
 
-  // fallback reasons
-  const reasons = analysis?.reasons || null;
-
-  // CRAI 구성요소 표용 데이터
-  const comp = analysis?.crai_components || null;
-
   const card = document.createElement("div");
-  card.className = "approval-card";
+  card.className = "summary-card";
   card.innerHTML = `
-    <div class="badge">REVIEW<br/>Required</div>
+    <div class="badge">SUMMARY</div>
     <div class="card-main">
       <div class="score-banner ${label.severity}">
         <div class="score-value">${score10.toFixed(1)} / 10</div>
         <div class="score-label">${label.level}</div>
       </div>
 
-      ${
-        vector
-          ? `<div class="vector-line">
-              <span>F ${F}%</span>
-              <span>R ${R}%</span>
-              <span>D ${D}%</span>
-            </div>`
-          : ""
-      }
+      ${vector ? `<div class="vector-line"><span>F ${F}%</span><span>R ${R}%</span><span>D ${D}%</span></div>` : ""}
 
-      ${
-        comp
-          ? `<h4>CRAI components</h4>
-             <table class="crai-table">
-               <tr><th>B</th><th>C</th><th>α</th><th>ρ</th><th>SF</th><th>SR</th><th>SD</th></tr>
-               <tr>
-                 <td>${toFixedOrDash(comp.B, 2)}</td>
-                 <td>${toFixedOrDash(comp.C, 2)}</td>
-                 <td>${toFixedOrDash(comp.alpha, 3)}</td>
-                 <td>${toFixedOrDash(comp.rho, 3)}</td>
-                 <td>${toFixedOrDash(comp.SF, 2)}</td>
-                 <td>${toFixedOrDash(comp.SR, 2)}</td>
-                 <td>${toFixedOrDash(comp.SD, 2)}</td>
-               </tr>
-             </table>`
-          : ""
-      }
+      ${comp ? `
+        <h4>CRAI components</h4>
+        <table class="crai-table">
+          <tr><th>B</th><th>C</th><th>α</th><th>ρ</th><th>SF</th><th>SR</th><th>SD</th></tr>
+          <tr>
+            <td>${toFixedOrDash(comp.B, 2)}</td>
+            <td>${toFixedOrDash(comp.C, 2)}</td>
+            <td>${toFixedOrDash(comp.alpha, 3)}</td>
+            <td>${toFixedOrDash(comp.rho, 3)}</td>
+            <td>${toFixedOrDash(comp.SF, 2)}</td>
+            <td>${toFixedOrDash(comp.SR, 2)}</td>
+            <td>${toFixedOrDash(comp.SD, 2)}</td>
+          </tr>
+        </table>` : ""}
 
-      ${
-        reasons && Object.keys(reasons).length
-          ? `<div class="reasons"><strong>Fallback Reasons:</strong>
-               <ul>${Object.entries(reasons)
-                 .map(([k,v]) => `<li><code>${escapeHtml(k)}</code>: ${escapeHtml(v)}</li>`)
-                 .join("")}</ul>
-             </div>`
-          : ""
-      }
+      <div class="actions">
+        <button class="action approve-all">Approve all (${blocksCount})</button>
+      </div>
+    </div>
+  `;
+  chat.appendChild(card);
+
+  card.querySelector(".approve-all")?.addEventListener("click", () => {
+    vscode.postMessage({
+      type: "approve",
+      mode: "all",
+      score: score10,
+      severity: label.severity
+    });
+  });
+}
+
+function renderApprovalCard(snippet, analysis, index) {
+  const { language, code } = snippet;
+  const filename = snippet.filename || null;
+
+  // 점수/등급 계산 (요약 카드와 동일 기준 사용)
+  const score10 = typeof analysis?.score10 === "number" ? analysis.score10 : toScore10(analysis?.score);
+  const label = (analysis?.level && analysis?.severity)
+    ? { key: analysis.level === "CRITICAL" ? "RED" : analysis.level === "HIGH" ? "ORANGE" : analysis.level === "MEDIUM" ? "YELLOW" : "GREEN",
+        level: analysis.level, severity: analysis.severity, action: actionFromLevel(analysis.level) }
+    : labelFromScore10(score10);
+
+  const card = document.createElement("div");
+  card.className = "approval-card";
+  card.innerHTML = `
+    <div class="badge">BLOCK #${index+1}</div>
+    <div class="card-main">
+      <div class="score-banner ${label.severity}">
+        <div class="score-value">${score10.toFixed(1)} / 10</div>
+        <div class="score-label">${label.level}</div>
+      </div>
 
       <h3>Generated Code Review</h3>
       <ul class="meta">
@@ -310,13 +320,11 @@ function renderApprovalCard(snippet, analysis) {
         ${filename ? `<li>Suggested filename: ${escapeHtml(filename)}</li>` : ""}
       </ul>
 
-      <pre class="code-preview"><code>${escapeHtml(code.slice(0, 1200))}${
-        code.length > 1200 ? "\n... (truncated)" : ""
-      }</code></pre>
+      <pre class="code-preview"><code>${escapeHtml(code.slice(0, 1200))}${code.length > 1200 ? "\n... (truncated)" : ""}</code></pre>
 
       <div class="actions">
-        <button class="approve-btn">Approve</button>
-        <button class="reject-btn">Reject</button>
+        <button class="action approve-btn">Approve block</button>
+        <button class="action reject-btn">Reject</button>
       </div>
     </div>
   `;
@@ -328,9 +336,8 @@ function renderApprovalCard(snippet, analysis) {
   card.querySelector(".approve-btn")?.addEventListener("click", () => {
     vscode.postMessage({
       type: "approve",
-      code,
-      language,
-      filename,
+      mode: "one",
+      index,
       score: score10,          // 10점 스케일
       severity: label.severity // green/yellow/orange/red
     });
@@ -339,18 +346,9 @@ function renderApprovalCard(snippet, analysis) {
   card.querySelector(".reject-btn")?.addEventListener("click", () => {
     vscode.postMessage({
       type: "reject",
-      code,
-      language,
-      filename,
-      score: score10,
-      severity: label.severity
+      index
     });
   });
-}
-
-function toFixedOrDash(v, n=2){
-  const x = Number(v);
-  return isFinite(x) ? x.toFixed(n) : "—";
 }
 
 /* ─────────────────────────────────────────────────────────────────────────────
@@ -437,7 +435,6 @@ window.addEventListener("message", (ev) => {
   if (msg.type === "delta") {
     if (!botDiv) startBotLine();
     lastBotBuffer += (msg.text || "");
-    // 마크다운으로 재렌더
     const md = botDiv.querySelector(".md");
     if (md) md.innerHTML = renderMarkdown(lastBotBuffer);
     chat.scrollTop = chat.scrollHeight;
@@ -445,10 +442,8 @@ window.addEventListener("message", (ev) => {
   }
 
   if (msg.type === "analysis") {
-    // 확장에서 전달: { vector, score, severity, level, suggestedFilename, language, code, reasons, crai_components?, breakdown? }
+    // 확장에서 전달된 대표 분석 (마지막 코드블록 기준)
     const scoreField = typeof msg.score10 === "number" ? msg.score10 : toScore10(msg.score);
-
-    // CRAI 구성요소는 여러 구조를 허용: 최상위 또는 breakdown.fused 내부.
     const craiComponents =
       msg.crai_components ||
       (msg.breakdown && msg.breakdown.fused && msg.breakdown.fused.crai_components) ||
@@ -456,36 +451,34 @@ window.addEventListener("message", (ev) => {
 
     window.__lastAnalysis = {
       vector: msg.vector,
-      score: scoreField,         // 10점 스케일 유지
+      score: scoreField,
       severity: msg.severity || null,
       score10: scoreField,
       level: msg.level || null,
       suggestedFilename: msg.suggestedFilename || null,
-      language: msg.language,
-      code: msg.code,
-      reasons: msg.reasons || {},            // fallback 이유 포함
+      reasons: msg.reasons || {},
       crai_components: craiComponents || null
     };
     return;
   }
 
   if (msg.type === "done") {
-    // 스트림 종료 → 승인 카드 렌더
-    const snippet = extractLastCodeBlock(lastBotBuffer);
-    if (snippet && snippet.code && snippet.code.trim().length > 0) {
-      const hint = detectSuggestedFileName(
-        lastBotBuffer,
-        snippet.language === "plaintext" ? "" : snippet.language
-      );
-      const analysis = window.__lastAnalysis || null;
+    // 스트림 종료 → 모든 코드블록 파싱 후 요약/개별 카드 렌더
+    const blocks = extractAllCodeBlocks(lastBotBuffer) || [];
+    lastBlocks = blocks.map((b) => {
+      const hint = detectSuggestedFileName(lastBotBuffer, b.language);
+      return { ...b, filename: hint || null };
+    });
 
-      // 분석에서 제안된 파일명이 있으면 우선 사용
-      snippet.filename = (analysis && analysis.suggestedFilename) ? analysis.suggestedFilename : (hint || null);
+    const analysis = window.__lastAnalysis || { score: 0, score10: 0, vector: [0,0,0] };
+    renderSummaryCard(analysis, lastBlocks.length);
 
-      renderApprovalCard({ ...snippet }, analysis || { score: 0, vector: [0,0,0] });
-    }
+    lastBlocks.forEach((snip, i) => {
+      // 대표 분석 점수를 각 블록 카드에도 동일 적용 (보수적 동일 등급)
+      renderApprovalCard(snip, analysis, i);
+    });
 
-    // 어시스턴트 응답을 히스토리에 저장 (맥락 유지)
+    // 어시스턴트 응답을 히스토리에 저장
     if (lastBotBuffer?.trim()) {
       history.push({ role: "assistant", content: lastBotBuffer });
     }
@@ -510,11 +503,9 @@ form?.addEventListener("submit", (e) => {
   const text = (input.value || "").trim();
   if (!text) return;
 
-  // 사용자 메시지를 UI와 히스토리에 기록
   append("user", text);
-  history.push({ role: "user", content: text }); // 히스토리 추가
+  history.push({ role: "user", content: text });
 
-  // 확장 쪽으로 질문 + 히스토리 전달
   vscode.postMessage({
     type: "ask",
     text,
