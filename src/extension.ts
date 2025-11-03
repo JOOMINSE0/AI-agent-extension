@@ -9,8 +9,8 @@ import * as path from "path";
  * 핵심:
  *  - CVE.org JSON에서 생성된 "정규식 룰 DB(generated_cve_rules.json)" + "벡터 DB(generated_cve_db.json)"
  *    를 동적으로 로딩하여 실제 데이터 기반 위험도(CVE) 점수를 계산.
- *  - 고정 vocab 삭제. 사전투영 없이 키 합집합 기반 코사인(벡터)와 정규식 휴리스틱(룰 DB)을 결합.
- *  - 룰 DB가 없으면 최소 동작 보장(벡터 Fallback).
+ *  - 고정 vocab/하드코딩 삭제. 코사인(벡터)와 정규식 휴리스틱(룰 DB)을 모두 JSON에서만 읽어 사용.
+ *  - DB가 없으면 해당 점수는 0으로 처리(동작은 유지, 로그 경고).
  */
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -20,19 +20,19 @@ import * as path from "path";
 export function activate(context: vscode.ExtensionContext) {
   console.log("AI Approval Agent is now active!");
 
-  // [NEW] 확장 시작 시 (1) 정규식 룰 DB (2) CVE 벡터 DB 로드
+  // (1) 정규식 룰 DB (2) CVE 벡터 DB 로드
   RULE_DB = loadGeneratedRuleDb(context);
   if (RULE_DB.length) {
     console.log(`[CVE] Loaded generated RULE DB: ${RULE_DB.length} signature(s)`);
   } else {
-    console.warn("[CVE] generated_cve_rules.json not found or empty. Regex scoring will be limited.");
+    console.warn("[CVE] WARNING: generated_cve_rules.json not found or empty. Regex scoring -> 0");
   }
 
   DYN_CVE_DB = loadGeneratedCveDb(context);
   if (DYN_CVE_DB.length) {
     console.log(`[CVE] Loaded generated VECTOR DB: ${DYN_CVE_DB.length} signature(s)`);
   } else {
-    console.warn("[CVE] generated_cve_db.json not found. Using built-in fallback vector DB.");
+    console.warn("[CVE] WARNING: generated_cve_db.json not found or empty. Vector scoring -> 0");
   }
 
   const provider = new ApprovalViewProvider(context);
@@ -172,7 +172,11 @@ function wireMessages(webview: vscode.Webview) {
             const fusedVector = heur.vector;
             const scored = scoreFromVector(fusedVector, { wF, wR, wD });
 
-            // 5) 웹뷰로 전달
+            // 5) 웹뷰로 전달 (+ DB 경고)
+            const dbWarns: string[] = [];
+            if (!RULE_DB.length) dbWarns.push("generated_cve_rules.json not loaded → regex score = 0");
+            if (!DYN_CVE_DB.length) dbWarns.push("generated_cve_db.json not loaded → vector score = 0");
+
             webview.postMessage({
               type: "analysis",
               vector: fusedVector,
@@ -183,7 +187,7 @@ function wireMessages(webview: vscode.Webview) {
               suggestedFilename: globalSuggested || null,
               language: primary.language,
               code: primary.code,
-              reasons: heur.reasons,
+              reasons: [...heur.reasons, ...dbWarns.map((w) => `warn:${w}`)],
               crai_components: scored.crai_components,
               signalTable: heur.signalTable,
               breakdown: { heurOnly: { vector: heur.vector, ...scored } },
@@ -277,6 +281,7 @@ async function chatWithOllamaAndReturn(
 
 /** (A) 정규식 룰 DB 타입 */
 type Rule = { rx: string; w: number; note?: string; token?: string; support?: number; idf?: number };
+type TokenizerRule = { name?: string; rx: string; w?: number };
 type Sig = {
   id: string;
   title: string;
@@ -287,20 +292,22 @@ type Sig = {
   negatives?: { rx: string; penalty: number; note?: string }[];
   group?: string;
   support_docs?: number;
+  tokenizer_rules?: TokenizerRule[]; // (선택) 시그니처 레벨 토크나이저 룰
 };
 
-/** (B) 벡터 시그니처 타입 (동적/내장 공용) */
+/** (B) 벡터 시그니처 타입 (동적 전용) */
 type CveVectorSig = {
   id: string;
   title: string;
   tokens: Record<string, number>; // 중요 토큰과 가중치
   baseSeverity: number; // 0..1
   notes?: string;
+  token_regex?: TokenizerRule[];    // (선택) 벡터 DB 제공 정규식 토큰 룰
 };
 
 /** 동적 로드된 DB들 */
-let RULE_DB: Sig[] = [];           // generated_cve_rules.json
-let DYN_CVE_DB: CveVectorSig[] = []; // generated_cve_db.json (없으면 fallback 사용)
+let RULE_DB: Sig[] = [];              // generated_cve_rules.json
+let DYN_CVE_DB: CveVectorSig[] = [];  // generated_cve_db.json
 
 /** generated_cve_rules.json 로드 함수 */
 function loadGeneratedRuleDb(ctx?: vscode.ExtensionContext): Sig[] {
@@ -311,6 +318,9 @@ function loadGeneratedRuleDb(ctx?: vscode.ExtensionContext): Sig[] {
     const raw = fs.readFileSync(p, "utf8");
     const obj = JSON.parse(raw);
     const arr = obj?.signatures as Sig[] | undefined;
+    // NOTE: 루트에 tokenizer_rules가 있을 수 있으므로 RULE_DB를 any로 볼 때 접근
+    (RULE_DB as any) = arr || [];
+    (RULE_DB as any).tokenizer_rules = obj?.tokenizer_rules || [];
     return Array.isArray(arr) ? arr : [];
   } catch (e) {
     console.error("[CVE] loadGeneratedRuleDb error:", e);
@@ -333,130 +343,64 @@ function loadGeneratedCveDb(ctx?: vscode.ExtensionContext): CveVectorSig[] {
   }
 }
 
-/** 내장 Fallback 벡터 DB (최소 동작 보장) */
-const FALLBACK_CVE_VECTOR_DB: CveVectorSig[] = [
-  {
-    id: "SIG-CMD-INJECT",
-    title: "Command Injection via shell/exec",
-    baseSeverity: 0.95,
-    tokens: {
-      exec: 1.5,
-      spawn: 1.3,
-      shell: 1.2,
-      system: 1.4,
-      popen: 1.4,
-      "child_process": 1.6,
-      bash: 1.0,
-      sh: 1.0,
-      userinput: 0.8,
-      "stringConcat": 0.8
-    }
-  },
-  {
-    id: "SIG-SQLI-CONCAT",
-    title: "SQL Injection via string concatenation",
-    baseSeverity: 0.90,
-    tokens: {
-      select: 1.2,
-      insert: 1.2,
-      update: 1.2,
-      delete: 1.2,
-      where: 1.0,
-      from: 0.8,
-      concat: 1.2,
-      format: 0.8,
-      fstring: 0.8,
-      userinput: 0.8,
-      query: 1.0
-    }
-  },
-  {
-    id: "SIG-DESERIALIZE-RCE",
-    title: "Unsafe Deserialization",
-    baseSeverity: 0.85,
-    tokens: { deserialize: 1.4, "pickle.loads": 1.6, "yaml.unsafe": 1.6, ObjectInputStream: 1.4, eval: 0.7 }
-  },
-  {
-    id: "SIG-SSTI",
-    title: "Server-Side Template Injection",
-    baseSeverity: 0.80,
-    tokens: { template: 1.2, render: 1.0, ejs: 1.2, jinja: 1.2, mustache: 1.0, eval: 0.8, Function: 0.8, userinput: 0.8 }
-  },
-  {
-    id: "SIG-REGEX-DOS",
-    title: "Catastrophic backtracking (ReDoS)",
-    baseSeverity: 0.70,
-    tokens: { regex: 1.0, "re.compile": 1.0, catastrophic: 1.2, userinput: 0.6 }
-  },
-  {
-    id: "SIG-VULN-PKG",
-    title: "Known vulnerable package used",
-    baseSeverity: 0.90,
-    tokens: { vulnerable_pkg_2023: 2.0 }
-  }
-];
-
-/** 실제 사용할 벡터 DB 선택 */
+/** 실제 사용할 벡터 DB 선택 — DYN 전용 (fallback 없음) */
 function getSigDB(): CveVectorSig[] {
-  return DYN_CVE_DB && DYN_CVE_DB.length ? DYN_CVE_DB : FALLBACK_CVE_VECTOR_DB;
+  return Array.isArray(DYN_CVE_DB) ? DYN_CVE_DB : [];
 }
 
-/** 코드 문자열 → 토큰 벡터(가중치 포함) */
+/** 룰/벡터 DB에서 토큰화 규칙 수집 (JSON만 사용) */
+function collectTokenizerPatterns() {
+  const globalRules: TokenizerRule[] = [];
+  const rootRules = (RULE_DB as any)?.tokenizer_rules as TokenizerRule[] | undefined;
+  if (Array.isArray(rootRules)) globalRules.push(...rootRules);
+
+  for (const sig of RULE_DB || []) {
+    const arr = sig.tokenizer_rules as TokenizerRule[] | undefined;
+    if (Array.isArray(arr)) globalRules.push(...arr);
+  }
+
+  const perSigRegex: TokenizerRule[] = [];
+  for (const sig of DYN_CVE_DB || []) {
+    const arr = sig.token_regex as TokenizerRule[] | undefined;
+    if (Array.isArray(arr)) perSigRegex.push(...arr);
+  }
+
+  return { globalRules, perSigRegex };
+}
+
+/** 코드 문자열 → 토큰 벡터(가중치 포함) — 100% JSON 데이터 구동 */
 function vectorizeCodeToTokens(code: string): Record<string, number> {
   const lower = code.toLowerCase();
-  const features: Record<string, number> = {};
-  const add = (k: string, w = 1) => (features[k] = (features[k] ?? 0) + w);
+  const feats: Record<string, number> = {};
+  const add = (k: string, w = 1) => { feats[k] = (feats[k] ?? 0) + w; };
 
-  // 일반 토큰
-  const words = lower.match(/[a-z_][a-z0-9_.]+/g) || [];
-  const wordSet = new Set(words);
-
-  // 입력/문자열 결합 힌트
-  if (/\b(input|prompt|readline|process\.argv|req\.query|req\.body|request\.getparameter)\b/.test(lower)) add("userinput", 1);
-  if (/("|'|`)\s*\+\s*\w|\w\s*\+\s*("|'|`)/.test(code)) add("stringConcat", 1);
-
-  // SQL
-  ["select", "insert", "update", "delete", "where", "from", "union", "concat"].forEach((k) => {
-    if (wordSet.has(k)) add(k, 1);
-  });
-  if (/\bfstring\b|`.*\${.*}`/.test(lower)) add("fstring", 1);
-  if (/\.format\(/.test(lower)) add("format", 1);
-  if (/\bquery\b/.test(lower)) add("query", 1);
-
-  // 명령 실행/셸
-  if (/\b(exec|spawn)\b/.test(lower)) add("exec", 1), add("spawn", 0.5);
-  if (/\b(child_process)\b/.test(lower)) add("child_process", 1.2);
-  if (/\bsystem\(|popen\(|subprocess\.(popen|run|call)\b/.test(lower)) {
-    add("system", 1);
-    add("popen", 1);
-    add("subprocess", 0.5);
+  // (1) 벡터 DB의 명시적 tokens 테이블: "정확 문자열" 존재 매칭
+  const sigDB = getSigDB();
+  if (sigDB.length) {
+    for (const sig of sigDB) {
+      const tokTable = sig.tokens || {};
+      for (const [tok, wRaw] of Object.entries(tokTable)) {
+        const w = typeof wRaw === "number" ? wRaw : 1;
+        if (!tok) continue;
+        const esc = tok.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+        const wordLike = /^[A-Za-z0-9_]+$/.test(tok);
+        const re = wordLike ? new RegExp(`\\b${esc}\\b`, "i") : new RegExp(esc, "i");
+        if (re.test(lower)) add(tok, w);
+      }
+    }
   }
-  if (/\b(sh|bash)\b/.test(lower)) add("sh", 0.3), add("bash", 0.3);
 
-  // 파일/환경
-  if (/\bfs\.(read|write|unlink|chmod|chown|readdir)/.test(lower)) add("fs.read", 0.8), add("fs.write", 0.6);
-  if (/\bprocess\.env\b|secret|password|credential/.test(lower)) add("env", 1), add("password", 0.6), add("credential", 0.6);
+  // (2) 룰/벡터 DB가 제공하는 정규식 기반 토큰화 규칙
+  const { globalRules, perSigRegex } = collectTokenizerPatterns();
+  for (const r of [...globalRules, ...perSigRegex]) {
+    if (!r?.rx) continue;
+    try {
+      const re = new RegExp(r.rx, "i");
+      if (re.test(lower)) add(r.name || r.rx, r.w ?? 1);
+    } catch { /* 잘못된 정규식은 무시 */ }
+  }
 
-  // 템플릿/SSTI
-  if (/\brender\(|template|ejs|jinja|mustache/.test(lower)) add("render", 0.8), add("template", 0.6);
-  if (/\beval\(|new\s+Function\(/.test(lower)) add("eval", 1), add("Function", 0.5);
-
-  // 역직렬화
-  if (/pickle\.loads|yaml\.load\(|yaml\.unsafe_load|objectinputstream/.test(lower))
-    add("deserialize", 1.2), add("pickle.loads", 1.6), add("yaml.unsafe", 1.4);
-
-  // 정규표현식
-  if (/(new\s+RegExp|re\.compile|\bre\b)/.test(lower)) add("regex", 1), add("re.compile", 0.6);
-  if (/(a+)+|(\.\*)\1/.test(lower)) add("catastrophic", 0.8);
-
-  // 네트워크
-  if (/\b(fetch|axios|request|http\.|https\.)/.test(lower))
-    add("fetch", 0.8), add("axios", 0.6), add("request", 0.6), add("http", 0.6), add("https", 0.6);
-
-  // 취약 패키지(예시)
-  if (/vulnerable[_-]?pkg[_-]?2023/.test(lower)) add("vulnerable_pkg_2023", 2);
-
-  return features;
+  return feats;
 }
 
 /** 코사인 유사도 (공통키 합집합 기반) */
@@ -474,14 +418,16 @@ function cosineSim(a: Record<string, number>, b: Record<string, number>): number
   return dot / (Math.sqrt(na) * Math.sqrt(nb));
 }
 
-/** 코드 벡터 vs (동적/내장) 시그니처 DB 유사도 계산 → severity 0..1, 상위 매치 리턴 */
+/** 코드 벡터 vs 시그니처 DB 유사도 계산 → severity 0..1, 상위 매치 리턴 */
 function vectorCveScan(code: string) {
-  const codeVec = vectorizeCodeToTokens(code);
   const DB = getSigDB();
+  if (!DB.length) return { aggregatedSeverity01: 0, matches: [] as any[] };
 
+  const codeVec = vectorizeCodeToTokens(code);
   const results = DB.map((sig) => {
-    const sim = cosineSim(codeVec, sig.tokens);
-    const sev = sig.baseSeverity * Math.min(1, Math.pow(Math.max(0, sim), 0.8) * 1.2);
+    const sim = cosineSim(codeVec, sig.tokens || {});
+    const base = clamp01(sig.baseSeverity ?? 0.7);
+    const sev = clamp01(base * Math.min(1, Math.pow(Math.max(0, sim), 0.8) * 1.2));
     return { id: sig.id, title: sig.title, similarity: sim, severity01: sev, notes: sig.notes ?? "" };
   }).sort((a, b) => b.severity01 - a.severity01);
 
@@ -492,81 +438,66 @@ function vectorCveScan(code: string) {
   return { aggregatedSeverity01: Math.min(1, agg), matches: results.filter((r) => r.similarity > 0.15).slice(0, 5) };
 }
 
-/** 정규식 룰 DB 기반 CVE 휴리스틱 점수 (하드코딩 룰 제거, DB 기반) */
+/** 정규식 룰 DB 기반 CVE 휴리스틱 점수 (JSON만 사용) */
 function regexHeuristicScoreFromDB(code: string, db: Sig[]) {
+  if (!db?.length) return { severity01: 0, matches: [] as any[] };
+
   const lower = code.toLowerCase();
   const lines = lower.split(/\r?\n/);
-  const compile = (rx: string) => new RegExp(rx, "i");
+  const RX = (rx: string) => new RegExp(rx, "i");
 
   const results = db.map((sig) => {
     let raw = 0;
     const matched: string[] = [];
 
-    // 1) 룰 매칭
+    // 1) 룰 매칭: w * idf (idf 없으면 1)
     for (const r of sig.rules || []) {
       try {
-        const re = compile(r.rx);
+        const re = RX(r.rx);
         if (re.test(lower)) {
-          raw += r.w || 0;
+          const w = (r.w ?? 1) * (r.idf ?? 1);
+          raw += w;
           matched.push(r.token || r.rx);
         }
-      } catch {
-        // 정규식 오류는 무시 (룰 생성기 튜닝 필요)
-      }
+      } catch { /* ignore bad rx */ }
     }
 
-    // 2) 동시출현 보너스
+    // 2) 동시출현/근접/네거티브
     sig.cooccur?.forEach((c) => {
-      const ok = (c.all || []).every((rx) => {
-        try { return compile(rx).test(lower); } catch { return false; }
-      });
+      const ok = (c.all || []).every((rx) => { try { return RX(rx).test(lower); } catch { return false; } });
       if (ok) raw += c.bonus || 0;
     });
 
-    // 3) 근접 보너스 
     sig.proximity?.forEach((p) => {
       try {
-        const A = compile(p.a), B = compile(p.b);
+        const A = RX(p.a), B = RX(p.b);
         const L = p.lines ?? 5;
-        const aIdx = lines.findIndex((ln) => A.test(ln));
-        if (aIdx >= 0) {
+        for (let i = 0; i < lines.length; i++) {
+          if (!A.test(lines[i])) continue;
           for (let d = -L; d <= L; d++) {
-            const j = aIdx + d;
-            if (j >= 0 && j < lines.length && B.test(lines[j])) {
-              raw += p.bonus || 0;
-              break;
-            }
+            const j = i + d;
+            if (j >= 0 && j < lines.length && B.test(lines[j])) { raw += p.bonus || 0; d = L + 1; break; }
           }
         }
       } catch { /* ignore */ }
     });
 
-    // 4) 네거티브(안전 API) 패널티
-    sig.negatives?.forEach((n) => {
-      try {
-        const re = compile(n.rx);
-        if (re.test(lower)) raw -= n.penalty || 0;
-      } catch { /* ignore */ }
-    });
+    sig.negatives?.forEach((n) => { try { if (RX(n.rx).test(lower)) raw -= n.penalty || 0; } catch {} });
 
-    // 5) BaseSeverity와 결합 (로지스틱 스케일)
-    const sev = (sig.baseSeverity ?? 0.7) * (1 - Math.exp(-3 * Math.max(0, raw)));
-    return {
-      id: sig.id,
-      title: sig.title,
-      severity01: Math.min(1, sev),
-      matched,
-      raw: Math.max(0, Number(raw.toFixed(3)))
-    };
+    // 3) BaseSeverity 결합 (룰 JSON의 값만 사용, support_docs 미세 보정)
+    const base = clamp01(sig.baseSeverity ?? 0.7);
+    const supBoost = Math.min(0.10, (Math.max(0, sig.support_docs ?? 0) / 1000)); // 0~+10%
+    const sev = clamp01((base * (1 + supBoost)) * (1 - Math.exp(-3 * Math.max(0, raw))));
+
+    return { id: sig.id, title: sig.title, severity01: sev, matched, raw: Number(Math.max(0, raw).toFixed(3)) };
   }).sort((a, b) => b.severity01 - a.severity01);
 
-  // 상위 3개 결합
   const topK = results.slice(0, 3);
   let agg = 0;
   for (const r of topK) agg = 1 - (1 - agg) * (1 - r.severity01);
 
   return {
-    severity01: Math.min(1, agg),
+    severity01: clamp01(agg),
     matches: results.filter((r) => r.severity01 > 0.15).slice(0, 5)
   };
 }
@@ -705,7 +636,7 @@ function preciseResourceAndSecurityScan(
   else if (loopDepthApprox === 1 || recursion) bigO = "O(n)";
   else bigO = "unknown";
 
-  // CVE: 정규식 룰(DB) + 벡터 결합
+  // CVE: 정규식 룰(DB) + 벡터(DB) 결합 (둘 다 JSON 근거만 사용)
   const regexRules = regexHeuristicScoreFromDB(code, RULE_DB);
   const vectorRules = vectorCveScan(code);
   const cveSeverity01 = clamp01(1 - (1 - regexRules.severity01) * (1 - vectorRules.aggregatedSeverity01));
