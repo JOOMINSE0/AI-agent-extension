@@ -1,26 +1,14 @@
-// src/extension.ts
+// VS Code 확장에 필요한 기본 모듈 import (전체 파이프라인 공통 인프라, SF/SR/SD 모두의 기반)
 import * as vscode from "vscode";
 import * as fs from "fs";
 import * as path from "path";
+import * as ts from "typescript";
 
-/**
- * AI Approval Agent (CRAI 식 적용 + 정적 분석 기반 SF/SR/SD 산출)
- *
- * 핵심:
- *  - CVE.org JSON에서 생성된 "정규식 룰 DB(generated_cve_rules.json)" + "벡터 DB(generated_cve_db.json)"
- *    를 동적으로 로딩하여 실제 데이터 기반 위험도(CVE) 점수를 계산.
- *  - 고정 vocab/하드코딩 삭제. 코사인(벡터)와 정규식 휴리스틱(룰 DB)을 모두 JSON에서만 읽어 사용.
- *  - DB가 없으면 해당 점수는 0으로 처리(동작은 유지, 로그 경고).
- */
-
-// ─────────────────────────────────────────────────────────────────────────────
-// 0) 확장 활성화
-// ─────────────────────────────────────────────────────────────────────────────
-
+// CRAI 기반 AI Approval Agent 확장 활성화 진입점 (전체 SF/SR/SD 계산을 트리거하는 엔트리)
 export function activate(context: vscode.ExtensionContext) {
   console.log("AI Approval Agent is now active!");
 
-  // (1) 정규식 룰 DB (2) CVE 벡터 DB 로드
+  // SD: CVE 룰 DB 로드(정규식 기반) → Dependency 위험(SD)에 사용
   RULE_DB = loadGeneratedRuleDb(context);
   if (RULE_DB.length) {
     console.log(`[CVE] Loaded generated RULE DB: ${RULE_DB.length} signature(s)`);
@@ -28,6 +16,7 @@ export function activate(context: vscode.ExtensionContext) {
     console.warn("[CVE] WARNING: generated_cve_rules.json not found or empty. Regex scoring -> 0");
   }
 
+  // SD: CVE 벡터 DB 로드(코사인 기반) → Dependency 위험(SD)에 사용
   DYN_CVE_DB = loadGeneratedCveDb(context);
   if (DYN_CVE_DB.length) {
     console.log(`[CVE] Loaded generated VECTOR DB: ${DYN_CVE_DB.length} signature(s)`);
@@ -35,6 +24,7 @@ export function activate(context: vscode.ExtensionContext) {
     console.warn("[CVE] WARNING: generated_cve_db.json not found or empty. Vector scoring -> 0");
   }
 
+  // SF/SR/SD 분석 결과를 보여주는 Webview 뷰 프로바이더 등록 (UI 레이어)
   const provider = new ApprovalViewProvider(context);
   context.subscriptions.push(
     vscode.window.registerWebviewViewProvider("aiApprovalView", provider, {
@@ -42,6 +32,7 @@ export function activate(context: vscode.ExtensionContext) {
     })
   );
 
+  // 패널 오픈 명령 등록 (UI용, FRD 계산과 직접적 연관은 없음)
   context.subscriptions.push(
     vscode.commands.registerCommand("ai-approval-agent.showPanel", () => {
       vscode.window.showInformationMessage("AI Approval Panel opened!");
@@ -49,16 +40,11 @@ export function activate(context: vscode.ExtensionContext) {
   );
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-/** 여러 코드블록 지원을 위한 타입/상태 */
-// ─────────────────────────────────────────────────────────────────────────────
+// Ollama 응답에서 추출한 코드블록을 관리하기 위한 타입 및 상태 (SF/SR/SD 계산 대상 코드 컨테이너)
 type Snippet = { language: string; code: string; suggested?: string | null };
-let LAST_SNIPPETS: Snippet[] = []; // 가장 최근 Ask로 생성된 코드블록 목록
+let LAST_SNIPPETS: Snippet[] = [];
 
-// ─────────────────────────────────────────────────────────────────────────────
-// 1) Webview Provider
-// ─────────────────────────────────────────────────────────────────────────────
-
+// Webview를 제공하는 뷰 프로바이더 구현 (UI → 확장으로 메시지 연결, SF/SR/SD 결과를 뷰로 전달)
 class ApprovalViewProvider implements vscode.WebviewViewProvider {
   constructor(private readonly ctx: vscode.ExtensionContext) {}
 
@@ -73,20 +59,22 @@ class ApprovalViewProvider implements vscode.WebviewViewProvider {
   }
 }
 
-/* ---------- Config ---------- */
+// 설정 파일에서 Ollama 엔드포인트 및 가중치 설정을 읽어오는 함수
+//  → CRAI 최종 점수에서 SF/SR/SD 가중치(wF, wR, wD)를 동적으로 조정 (scoreFromVector에서 사용)
 function getCfg() {
   const cfg = vscode.workspace.getConfiguration();
   return {
     endpoint: (cfg.get<string>("aiApproval.ollama.endpoint") || "http://210.110.103.64:11434").replace(/\/$/, ""),
     model: cfg.get<string>("aiApproval.ollama.model") || "llama3.1:8b",
-    // FRD weights
-    wF: cfg.get<number>("aiApproval.weights.functionality") ?? 0.40,
-    wR: cfg.get<number>("aiApproval.weights.resource") ?? 0.30,
-    wD: cfg.get<number>("aiApproval.weights.dependency") ?? 0.30
+    wF: cfg.get<number>("aiApproval.weights.functionality") ?? 0.40, // SF 가중치
+    wR: cfg.get<number>("aiApproval.weights.resource") ?? 0.30,      // SR 가중치
+    wD: cfg.get<number>("aiApproval.weights.dependency") ?? 0.30     // SD 가중치
   };
 }
 
-/* ---------- Webview messaging ---------- */
+// Webview와 확장 사이의 메시지 핸들링(Ask/Approve/Reject 등)을 담당하는 함수
+//  - "ask": Ollama로부터 코드 생성 → runStaticPipeline → analyzeFromStaticMetrics → scoreFromVector
+//    → SF/SR/SD + CRAI 점수를 계산하고 Webview에 전달
 function wireMessages(webview: vscode.Webview) {
   webview.onDidReceiveMessage(async (msg) => {
     try {
@@ -94,7 +82,7 @@ function wireMessages(webview: vscode.Webview) {
         case "approve": {
           const { mode } = msg || {};
 
-          // RED gate
+          // SD 결과(Dependency 위험)에 의해 점수가 높아져 severity가 red인 경우, CONFIRM 게이트 (CRAI 결과 기반 게이트)
           if (msg?.severity === "red") {
             const input = await vscode.window.showInputBox({
               prompt: `High risk (${msg?.score}). Type 'CONFIRM' to continue.`,
@@ -103,6 +91,7 @@ function wireMessages(webview: vscode.Webview) {
             if (input !== "CONFIRM") return;
           }
 
+          // SF/SR/SD 분석 결과에 따라 사용자가 승인한 코드(LAST_SNIPPETS)를 실제 워크스페이스에 반영
           if (mode === "one" || mode === "all") {
             if (!LAST_SNIPPETS.length) {
               vscode.window.showWarningMessage("승인할 코드가 없습니다. 먼저 'Ask'로 코드를 생성하세요.");
@@ -123,7 +112,6 @@ function wireMessages(webview: vscode.Webview) {
               break;
             }
           } else {
-            // 레거시: 단일 코드 승인
             const { code = "", language = "plaintext" } = msg || {};
             await handleApproval(code, language, null);
           }
@@ -131,24 +119,27 @@ function wireMessages(webview: vscode.Webview) {
         }
 
         case "reject": {
+          // 사용자가 CRAI(SF/SR/SD 기반) 결과를 보고 코드를 거부한 경우
           vscode.window.showWarningMessage("Rejected (not saved or executed).");
           break;
         }
 
         case "details": {
+          // Webview 카드에 표시된 SF/SR/SD 상세 사유를 확인하도록 안내 (UI-only)
           vscode.window.showInformationMessage("View details: the reason is shown on the card.");
           break;
         }
 
         case "ask": {
+          // Ollama 호출 → 코드 생성 → SF/SR/SD 분석의 입구
           const { endpoint, model, wF, wR, wD } = getCfg();
           try {
-            // 1) 코드 생성 스트리밍
+            // Ollama와 스트리밍으로 대화 (코드 텍스트 획득 단계, SF/SR/SD와 직접적 계산은 여기서 x)
             const fullText = await chatWithOllamaAndReturn(endpoint, model, msg.text, (delta) => {
               webview.postMessage({ type: "delta", text: delta });
             });
 
-            // 2) 전체 코드블록 추출 + 상태 저장
+            // 생성된 응답에서 코드블록 추출 (SF/SR/SD 분석 대상 코드 목록)
             const blocks = extractCodeBlocksTS(fullText);
             LAST_SNIPPETS = blocks.map((b) => ({
               language: b.language,
@@ -156,7 +147,7 @@ function wireMessages(webview: vscode.Webview) {
               suggested: detectSuggestedFileName(b.code, b.language)
             }));
 
-            // 3) 대표 블록(마지막)으로 정적 파이프라인 실행
+            // SF/SR/SD 분석은 기본적으로 마지막 코드블록(primary)에 대해 수행
             const primary =
               LAST_SNIPPETS.length > 0
                 ? LAST_SNIPPETS[LAST_SNIPPETS.length - 1]
@@ -165,31 +156,41 @@ function wireMessages(webview: vscode.Webview) {
             const globalSuggested =
               detectSuggestedFileName(fullText, primary.language) || primary.suggested || null;
 
+            // ★ runStaticPipeline: 정적 분석 전체 파이프라인
+            //   - SF: computeFSignalsSemantic, coreTouched, apiChanges, schemaChanged 등
+            //   - SR: Big-O, CC, 메모리, 외부/IO 호출
+            //   - SD: CVE 스캔, 라이브러리 평판, 권한 위험
             const metrics = await runStaticPipeline(primary.code, globalSuggested, primary.language);
 
-            // 4) 정적 분석 → FRD → CRAI
+            // ★ analyzeFromStaticMetrics:
+            //   - SF: F 값 (Functionality)
+            //   - SR: R 값 (Resource)
+            //   - SD: D 값 (Dependency)
             const heur = analyzeFromStaticMetrics(metrics, globalSuggested);
-            const fusedVector = heur.vector;
+            const fusedVector = heur.vector; // [SF, SR, SD]
+
+            // ★ scoreFromVector:
+            //   - FRD 벡터([SF, SR, SD])와 가중치(wF, wR, wD)로 CRAI 점수 계산
             const scored = scoreFromVector(fusedVector, { wF, wR, wD });
 
-            // 5) 웹뷰로 전달 (+ DB 경고)
             const dbWarns: string[] = [];
             if (!RULE_DB.length) dbWarns.push("generated_cve_rules.json not loaded → regex score = 0");
             if (!DYN_CVE_DB.length) dbWarns.push("generated_cve_db.json not loaded → vector score = 0");
 
+            // Webview로 SF/SR/SD와 CRAI 구성요소를 모두 전달
             webview.postMessage({
               type: "analysis",
-              vector: fusedVector,
-              score: scored.score,
-              severity: scored.severity,
-              level: scored.level,
-              weights: scored.weights,
+              vector: fusedVector,                       // [SF, SR, SD]
+              score: scored.score,                       // CRAI 점수
+              severity: scored.severity,                 // CRAI 심각도
+              level: scored.level,                       // CRAI 레벨(LOW/MEDIUM/HIGH/CRITICAL)
+              weights: scored.weights,                   // wF, wR, wD
               suggestedFilename: globalSuggested || null,
               language: primary.language,
               code: primary.code,
               reasons: [...heur.reasons, ...dbWarns.map((w) => `warn:${w}`)],
-              crai_components: scored.crai_components,
-              signalTable: heur.signalTable,
+              crai_components: scored.crai_components,   // B, C, alpha, rho, s, SF, SR, SD 등 내부 구성
+              signalTable: heur.signalTable,             // FRD 각각의 내부 시그널 테이블
               breakdown: { heurOnly: { vector: heur.vector, ...scored } },
               blocks: LAST_SNIPPETS.map((b, i) => ({
                 index: i,
@@ -219,16 +220,16 @@ function wireMessages(webview: vscode.Webview) {
   });
 }
 
-/* ---------- Ollama chat (stream + return full text) ---------- */
+// Ollama와 스트리밍 방식으로 대화하고 전체 응답 텍스트를 반환하는 함수
+//  → SF/SR/SD 분석용 "원본 코드 텍스트"를 가져오는 단계 (FRD 계산의 입력 준비)
 async function chatWithOllamaAndReturn(
   endpoint: string,
   model: string,
   userText: string,
   onDelta: (text: string) => void
 ): Promise<string> {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const fetchFn: any = (globalThis as any).fetch;
-  if (!fetchFn) return ""; // 네트워크 불가 환경에서도 UI가 깨지지 않도록
+  if (!fetchFn) return "";
 
   const res = await fetchFn(`${endpoint}/api/chat`, {
     method: "POST",
@@ -268,48 +269,43 @@ async function chatWithOllamaAndReturn(
           onDelta(piece);
         }
       } catch {
-        /* ignore partial */
       }
     }
   }
   return full;
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// 2) CVE DB들 로딩 + 유사도/휴리스틱 계산
-// ─────────────────────────────────────────────────────────────────────────────
-
-/** (A) 정규식 룰 DB 타입 */
+// CVE 정규식 룰 DB, 토크나이저 룰, 벡터 시그니처 타입 정의
+//  → Dependency 차원(SD)에서 취약점 및 의존성 위험을 수치화하기 위한 구조
 type Rule = { rx: string; w: number; note?: string; token?: string; support?: number; idf?: number };
 type TokenizerRule = { name?: string; rx: string; w?: number };
 type Sig = {
   id: string;
   title: string;
-  baseSeverity: number; // 0..1
+  baseSeverity: number;
   rules: Rule[];
   cooccur?: { all: string[]; bonus: number }[];
   proximity?: { a: string; b: string; lines: number; bonus: number }[];
   negatives?: { rx: string; penalty: number; note?: string }[];
   group?: string;
   support_docs?: number;
-  tokenizer_rules?: TokenizerRule[]; // (선택) 시그니처 레벨 토크나이저 룰
+  tokenizer_rules?: TokenizerRule[];
 };
 
-/** (B) 벡터 시그니처 타입 (동적 전용) */
 type CveVectorSig = {
   id: string;
   title: string;
-  tokens: Record<string, number>; // 중요 토큰과 가중치
-  baseSeverity: number; // 0..1
+  tokens: Record<string, number>;
+  baseSeverity: number;
   notes?: string;
-  token_regex?: TokenizerRule[];    // (선택) 벡터 DB 제공 정규식 토큰 룰
+  token_regex?: TokenizerRule[];
 };
 
-/** 동적 로드된 DB들 */
-let RULE_DB: Sig[] = [];              // generated_cve_rules.json
-let DYN_CVE_DB: CveVectorSig[] = [];  // generated_cve_db.json
+// 동적으로 로드된 CVE 룰/벡터 DB 전역 상태 (SD: Dependency 위험 계산용 핵심 데이터)
+let RULE_DB: Sig[] = [];
+let DYN_CVE_DB: CveVectorSig[] = [];
 
-/** generated_cve_rules.json 로드 함수 */
+// generated_cve_rules.json 파일을 로드하는 함수 (SD: 정규식 기반 취약점 룰 세트 초기화)
 function loadGeneratedRuleDb(ctx?: vscode.ExtensionContext): Sig[] {
   try {
     const base = ctx ? ctx.extensionUri.fsPath : process.cwd();
@@ -318,7 +314,6 @@ function loadGeneratedRuleDb(ctx?: vscode.ExtensionContext): Sig[] {
     const raw = fs.readFileSync(p, "utf8");
     const obj = JSON.parse(raw);
     const arr = obj?.signatures as Sig[] | undefined;
-    // NOTE: 루트에 tokenizer_rules가 있을 수 있으므로 RULE_DB를 any로 볼 때 접근
     (RULE_DB as any) = arr || [];
     (RULE_DB as any).tokenizer_rules = obj?.tokenizer_rules || [];
     return Array.isArray(arr) ? arr : [];
@@ -328,7 +323,7 @@ function loadGeneratedRuleDb(ctx?: vscode.ExtensionContext): Sig[] {
   }
 }
 
-/** generated_cve_db.json 로드 함수 (벡터) */
+// generated_cve_db.json 벡터 DB를 로드하는 함수 (SD: 벡터 기반 취약점 시그니처 초기화)
 function loadGeneratedCveDb(ctx?: vscode.ExtensionContext): CveVectorSig[] {
   try {
     const base = ctx ? ctx.extensionUri.fsPath : process.cwd();
@@ -343,12 +338,13 @@ function loadGeneratedCveDb(ctx?: vscode.ExtensionContext): CveVectorSig[] {
   }
 }
 
-/** 실제 사용할 벡터 DB 선택 — DYN 전용 (fallback 없음) */
+// 현재 사용 가능한 벡터 DB를 반환하는 헬퍼 (SD: Dependency 위험 계산에서 사용하는 시그니처 집합)
 function getSigDB(): CveVectorSig[] {
   return Array.isArray(DYN_CVE_DB) ? DYN_CVE_DB : [];
 }
 
-/** 룰/벡터 DB에서 토큰화 규칙 수집 (JSON만 사용) */
+// 룰/벡터 DB에서 토큰화에 쓸 정규식 패턴을 수집하는 함수
+//  → SD: 코드에서 취약점 패턴 토큰을 추출하기 위한 토크나이저 정의
 function collectTokenizerPatterns() {
   const globalRules: TokenizerRule[] = [];
   const rootRules = (RULE_DB as any)?.tokenizer_rules as TokenizerRule[] | undefined;
@@ -368,13 +364,13 @@ function collectTokenizerPatterns() {
   return { globalRules, perSigRegex };
 }
 
-/** 코드 문자열 → 토큰 벡터(가중치 포함) — 100% JSON 데이터 구동 */
+// 코드 문자열을 CVE 토큰 벡터(가중치 포함)로 변환하는 함수
+//  → SD: 코드에서 발견된 취약점 관련 토큰을 벡터로 표현하여 Dependency 위험(SD) 계산에 사용
 function vectorizeCodeToTokens(code: string): Record<string, number> {
   const lower = code.toLowerCase();
   const feats: Record<string, number> = {};
   const add = (k: string, w = 1) => { feats[k] = (feats[k] ?? 0) + w; };
 
-  // (1) 벡터 DB의 명시적 tokens 테이블: "정확 문자열" 존재 매칭
   const sigDB = getSigDB();
   if (sigDB.length) {
     for (const sig of sigDB) {
@@ -390,20 +386,21 @@ function vectorizeCodeToTokens(code: string): Record<string, number> {
     }
   }
 
-  // (2) 룰/벡터 DB가 제공하는 정규식 기반 토큰화 규칙
   const { globalRules, perSigRegex } = collectTokenizerPatterns();
   for (const r of [...globalRules, ...perSigRegex]) {
     if (!r?.rx) continue;
     try {
       const re = new RegExp(r.rx, "i");
       if (re.test(lower)) add(r.name || r.rx, r.w ?? 1);
-    } catch { /* 잘못된 정규식은 무시 */ }
+    } catch {
+    }
   }
 
   return feats;
 }
 
-/** 코사인 유사도 (공통키 합집합 기반) */
+// 두 벡터 간 코사인 유사도를 계산하는 함수
+//  → SD: 코드 토큰 벡터 vs CVE 시그니처 벡터 유사도를 통해 Dependency 위험 정도 추정
 function cosineSim(a: Record<string, number>, b: Record<string, number>): number {
   let dot = 0, na = 0, nb = 0;
   const keys = new Set([...Object.keys(a), ...Object.keys(b)]);
@@ -418,7 +415,8 @@ function cosineSim(a: Record<string, number>, b: Record<string, number>): number
   return dot / (Math.sqrt(na) * Math.sqrt(nb));
 }
 
-/** 코드 벡터 vs 시그니처 DB 유사도 계산 → severity 0..1, 상위 매치 리턴 */
+// 코드 벡터와 CVE 벡터 DB를 비교해 위험도 및 상위 매칭 결과를 산출하는 함수
+//  → SD: D 차원에서 cveSeverity01에 반영되는 "벡터 기반 취약점 위험" 계산
 function vectorCveScan(code: string) {
   const DB = getSigDB();
   if (!DB.length) return { aggregatedSeverity01: 0, matches: [] as any[] };
@@ -438,7 +436,8 @@ function vectorCveScan(code: string) {
   return { aggregatedSeverity01: Math.min(1, agg), matches: results.filter((r) => r.similarity > 0.15).slice(0, 5) };
 }
 
-/** 정규식 룰 DB 기반 CVE 휴리스틱 점수 (JSON만 사용) */
+// 정규식 룰 DB를 이용해 CVE 위험도를 계산하는 함수
+//  → SD: D 차원에서 cveSeverity01에 반영되는 "정규식 기반 취약점 위험" 계산
 function regexHeuristicScoreFromDB(code: string, db: Sig[]) {
   if (!db?.length) return { severity01: 0, matches: [] as any[] };
 
@@ -450,7 +449,6 @@ function regexHeuristicScoreFromDB(code: string, db: Sig[]) {
     let raw = 0;
     const matched: string[] = [];
 
-    // 1) 룰 매칭: w * idf (idf 없으면 1)
     for (const r of sig.rules || []) {
       try {
         const re = RX(r.rx);
@@ -459,10 +457,10 @@ function regexHeuristicScoreFromDB(code: string, db: Sig[]) {
           raw += w;
           matched.push(r.token || r.rx);
         }
-      } catch { /* ignore bad rx */ }
+      } catch {
+      }
     }
 
-    // 2) 동시출현/근접/네거티브
     sig.cooccur?.forEach((c) => {
       const ok = (c.all || []).every((rx) => { try { return RX(rx).test(lower); } catch { return false; } });
       if (ok) raw += c.bonus || 0;
@@ -479,14 +477,14 @@ function regexHeuristicScoreFromDB(code: string, db: Sig[]) {
             if (j >= 0 && j < lines.length && B.test(lines[j])) { raw += p.bonus || 0; d = L + 1; break; }
           }
         }
-      } catch { /* ignore */ }
+      } catch {
+      }
     });
 
     sig.negatives?.forEach((n) => { try { if (RX(n.rx).test(lower)) raw -= n.penalty || 0; } catch {} });
 
-    // 3) BaseSeverity 결합 (룰 JSON의 값만 사용, support_docs 미세 보정)
     const base = clamp01(sig.baseSeverity ?? 0.7);
-    const supBoost = Math.min(0.10, (Math.max(0, sig.support_docs ?? 0) / 1000)); // 0~+10%
+    const supBoost = Math.min(0.10, (Math.max(0, sig.support_docs ?? 0) / 1000));
     const sev = clamp01((base * (1 + supBoost)) * (1 - Math.exp(-3 * Math.max(0, raw))));
 
     return { id: sig.id, title: sig.title, severity01: sev, matched, raw: Number(Math.max(0, raw).toFixed(3)) };
@@ -502,13 +500,193 @@ function regexHeuristicScoreFromDB(code: string, db: Sig[]) {
   };
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// 3) 정밀 리소스/보안 + CRAI 계산 (기존 로직 유지)
-// ─────────────────────────────────────────────────────────────────────────────
+// AST 기반 호출 그래프를 표현하기 위한 타입 및 구조체 정의
+//  → SF: 기능적 영향도(Functionality)를 계산하기 위한 호출 그래프 구조
+type CGNodeId = string;
+type CallGraph = {
+  nodes: Set<CGNodeId>;
+  edges: Map<CGNodeId, Set<CGNodeId>>;
+  indeg: Map<CGNodeId, number>;
+  outdeg: Map<CGNodeId, number>;
+  entrypoints: Set<CGNodeId>;
+  changed: Set<CGNodeId>;
+};
 
+// 함수/핸들러가 엔트리포인트인지 추정하는 휴리스틱 함수
+//  → SF: 사용자 요청/외부 인터페이스에 가까운 노드를 엔트리포인트로 간주해 기능 영향도 측정
+function isProbableEntrypoint(name: string, isExported: boolean, fileText: string): boolean {
+  if (isExported) return true;
+  if (/\b(app|router)\.(get|post|put|delete|patch)\s*\(/.test(fileText)) return true;
+  if (/\bexport\s+default\b/.test(fileText) && /handler|route|loader/i.test(name)) return true;
+  return false;
+}
+
+// TypeScript AST로부터 호출 그래프를 구성하는 함수
+//  → SF: 엔트리포인트/함수 간 호출 관계를 분석해 Functionality 영향도(SF) 신호에 활용
+function buildCallGraphFromTS(code: string, virtFileName = "snippet.ts"): CallGraph {
+  const src = ts.createSourceFile(virtFileName, code, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+  const cg: CallGraph = {
+    nodes: new Set(),
+    edges: new Map(),
+    indeg: new Map(),
+    outdeg: new Map(),
+    entrypoints: new Set(),
+    changed: new Set(),
+  };
+
+  const fileText = code;
+  const decls: Array<{ id: CGNodeId; name: string; isExported: boolean; node: ts.Node }> = [];
+
+  const idOf = (name: string) => `${virtFileName}::${name}`;
+  const addNode = (id: CGNodeId) => {
+    cg.nodes.add(id);
+    if (!cg.edges.has(id)) cg.edges.set(id, new Set());
+    if (!cg.indeg.has(id)) cg.indeg.set(id, 0);
+    if (!cg.outdeg.has(id)) cg.outdeg.set(id, 0);
+  };
+  const addEdge = (from: CGNodeId, to: CGNodeId) => {
+    addNode(from); addNode(to);
+    const s = cg.edges.get(from)!;
+    if (!s.has(to)) {
+      s.add(to);
+      cg.outdeg.set(from, (cg.outdeg.get(from) || 0) + 1);
+      cg.indeg.set(to, (cg.indeg.get(to) || 0) + 1);
+    }
+  };
+
+  const visitDecl = (node: ts.Node) => {
+    if (ts.isFunctionDeclaration(node) && node.name) {
+      const name = node.name.getText(src);
+      const isExported = node.modifiers?.some(m => m.kind === ts.SyntaxKind.ExportKeyword) ?? false;
+      decls.push({ id: idOf(name), name, isExported, node });
+    } else if (ts.isVariableStatement(node)) {
+      const isExported = node.modifiers?.some(m => m.kind === ts.SyntaxKind.ExportKeyword) ?? false;
+      node.declarationList.declarations.forEach(d => {
+        const name = d.name.getText(src);
+        if (d.initializer && (ts.isFunctionExpression(d.initializer) || ts.isArrowFunction(d.initializer))) {
+          decls.push({ id: idOf(name), name, isExported, node: d.initializer });
+        }
+      });
+    } else if (ts.isClassDeclaration(node) && node.name) {
+      const name = node.name.getText(src);
+      const isExported = node.modifiers?.some(m => m.kind === ts.SyntaxKind.ExportKeyword) ?? false;
+      decls.push({ id: idOf(name), name, isExported, node });
+    }
+    ts.forEachChild(node, visitDecl);
+  };
+  visitDecl(src);
+
+  decls.forEach(d => {
+    addNode(d.id);
+    if (isProbableEntrypoint(d.name, d.isExported, fileText)) cg.entrypoints.add(d.id);
+  });
+
+  const nameToId = new Map<string, CGNodeId>();
+  decls.forEach(d => nameToId.set(d.name, d.id));
+
+  const collectCallsIn = (node: ts.Node, current: CGNodeId | null) => {
+    if (ts.isCallExpression(node)) {
+      let calleeName = "";
+      if (ts.isIdentifier(node.expression)) {
+        calleeName = node.expression.text;
+      } else if (ts.isPropertyAccessExpression(node.expression) && ts.isIdentifier(node.expression.name)) {
+        calleeName = node.expression.name.text;
+      }
+      if (calleeName && current && nameToId.has(calleeName)) {
+        addEdge(current, nameToId.get(calleeName)!);
+      }
+    }
+    ts.forEachChild(node, n => collectCallsIn(n, current));
+  };
+
+  decls.forEach(d => collectCallsIn(d.node, d.id));
+  decls.forEach(d => cg.changed.add(d.id));
+
+  return cg;
+}
+
+// 특정 노드 집합에서 도달 가능한 노드들을 찾는 DFS 함수
+//  → SF: 변경된 함수들이 시스템에서 어느 범위까지 영향을 미치는지(Reachability)를 추정
+function forwardReachable(cg: CallGraph, fromSet: Set<CGNodeId>): Set<CGNodeId> {
+  const seen = new Set<CGNodeId>();
+  const stack: CGNodeId[] = [...fromSet];
+  while (stack.length) {
+    const u = stack.pop()!;
+    if (seen.has(u)) continue;
+    seen.add(u);
+    const outs = cg.edges.get(u) || new Set();
+    outs.forEach(v => { if (!seen.has(v)) stack.push(v); });
+  }
+  return seen;
+}
+
+// 변경된 코드에서 특정 엔트리포인트까지 경로가 존재하는지 확인하는 함수
+//  → SF: 엔트리포인트 영향 비율(impactedEntrypointRatio)을 계산하는데 활용
+function anyPathToEntrypoint(cg: CallGraph, fromSet: Set<CGNodeId>, entry: CGNodeId): boolean {
+  const reach = forwardReachable(cg, fromSet);
+  return reach.has(entry);
+}
+
+// 변경 노드들의 중심성을 근사적으로 계산하는 함수
+//  → SF: 호출 그래프에서 변경 노드가 얼마나 "중심적"인지(centrality)를 측정
+function centralityApprox(cg: CallGraph, nodes: Set<CGNodeId>): number {
+  let acc = 0;
+  nodes.forEach(n => { acc += (cg.indeg.get(n) || 0) + (cg.outdeg.get(n) || 0); });
+  const localAvg = nodes.size ? acc / nodes.size : 0;
+
+  let total = 0;
+  cg.nodes.forEach(n => { total += (cg.indeg.get(n) || 0) + (cg.outdeg.get(n) || 0); });
+  const globalAvg = cg.nodes.size ? total / cg.nodes.size : 1;
+
+  const raw = globalAvg ? (localAvg / (globalAvg * 2)) : 0;
+  return clamp01(raw);
+}
+
+// TS/JS 코드에서 AST/호출그래프 기반 기능 영향도(SF) 신호를 계산하는 함수
+//  → SF: Functionality 차원을 AST/호출 그래프 기반으로 재정의하는 핵심 로직
+function computeFSignalsSemantic(code: string, language: string) {
+  const lang = (language || "").toLowerCase();
+  if (!(lang.includes("ts") || lang.includes("js") || lang === "plaintext")) return null;
+
+  let cg: CallGraph;
+  try {
+    cg = buildCallGraphFromTS(code);
+  } catch {
+    return null;
+  }
+  if (cg.nodes.size === 0) return { score: 0, details: { reason: "no nodes" } };
+
+  const reach = forwardReachable(cg, cg.changed);
+  const reachableNodesRatio = Math.min(1, reach.size / Math.max(1, cg.nodes.size));
+
+  let impactedEntrypoints = 0;
+  cg.entrypoints.forEach(ep => { if (anyPathToEntrypoint(cg, cg.changed, ep)) impactedEntrypoints++; });
+  const totalEntrypoints = Math.max(1, cg.entrypoints.size || 1);
+  const impactedEntrypointRatio = Math.min(1, impactedEntrypoints / totalEntrypoints);
+
+  const centralityScore = centralityApprox(cg, cg.changed);
+
+  const w1 = 0.5, w2 = 0.3, w3 = 0.2;
+  const score = clamp01(w1 * impactedEntrypointRatio + w2 * reachableNodesRatio + w3 * centralityScore);
+
+  return {
+    score,
+    details: {
+      impactedEntrypointRatio: Number(impactedEntrypointRatio.toFixed(3)),
+      reachableNodesRatio: Number(reachableNodesRatio.toFixed(3)),
+      centralityScore: Number(centralityScore.toFixed(3)),
+      nodes: cg.nodes.size,
+      entrypoints: cg.entrypoints.size
+    }
+  };
+}
+
+// 정적 분석 결과를 담는 메인 메트릭 타입 정의
+//  - SF: apiChanges, coreTouched, diffChangedLines, schemaChanged, semanticF
+//  - SR: bigO, cc, loopCount, loopDepthApprox, recursion, memAllocs, memBytesApprox, externalCalls, ioCalls
+//  - SD: cveSeverity01, libReputation01, licenseMismatch, permRisk01
 type BigOClass = "O(1)" | "O(log n)" | "O(n)" | "O(n log n)" | "O(n^2)" | "O(n^3)" | "unknown";
 type StaticMetrics = {
-  // SF
   apiChanges: number;
   totalApis: number;
   coreTouched: boolean;
@@ -516,7 +694,13 @@ type StaticMetrics = {
   totalLines: number;
   schemaChanged: boolean;
 
-  // SR (정밀)
+  semanticF?: {
+    score: number;
+    impactedEntrypointRatio: number;
+    reachableNodesRatio: number;
+    centralityScore: number;
+  };
+
   bigO: BigOClass;
   cc: number;
   loopCount: number;
@@ -531,7 +715,6 @@ type StaticMetrics = {
   externalCalls: number;
   ioCalls: number;
 
-  // SD
   cveSeverity01: number;
   libReputation01: number;
   licenseMismatch: boolean;
@@ -540,7 +723,11 @@ type StaticMetrics = {
   _reasons: string[];
 };
 
+// 0~1 범위로 값을 클램핑하는 가벼운 유틸 함수 (SF/SR/SD 공통)
 const clamp01 = (x: number) => Math.max(0, Math.min(1, x));
+
+// Big-O 복잡도를 0~1 스케일로 매핑하는 함수
+//  → SR: 시간 복잡도(Big-O)를 Resource 차원(SR)의 신호로 사용
 function mapBigOTo01(bigO: BigOClass) {
   const lut: { [k in BigOClass]: number } = {
     "O(1)": 0.05,
@@ -553,45 +740,45 @@ function mapBigOTo01(bigO: BigOClass) {
   };
   return lut[bigO] ?? 0.50;
 }
-const sat01 = (x: number, k: number) => clamp01(1 - Math.exp(-k * Math.max(0, x))); // 포화형 스케일러
 
+// 포화형 스케일링을 위한 지수 기반 함수 (SR/SD에서 여러 신호를 정규화할 때 사용)
+const sat01 = (x: number, k: number) => clamp01(1 - Math.exp(-k * Math.max(0, x)));
+
+// 시간/공간 복잡도, 외부 호출, 권한 등을 정밀하게 스캔하는 함수
+//  → SR: bigO, cc, loop, memAllocs, memBytesApprox, externalCalls, ioCalls
+//  → SD: cveSeverity01, libReputation01, permRisk01, licenseMismatch
+//  (즉, Resource(SR) + Dependency(SD) 차원에 대한 정밀 스캐너)
 function preciseResourceAndSecurityScan(
   code: string
 ): Omit<
   StaticMetrics,
-  "apiChanges" | "totalApis" | "coreTouched" | "diffChangedLines" | "totalLines" | "schemaChanged"
+  "apiChanges" | "totalApis" | "coreTouched" | "diffChangedLines" | "totalLines" | "schemaChanged" | "semanticF"
 > {
   const reasons: string[] = [];
   const lower = code.toLowerCase();
 
-  // Cyclomatic Complexity (간이)
   const branches = (code.match(/\b(if|else if|case|catch|&&|\|\||\?[:]|for|while|switch|try)\b/g) || []).length;
   const cc = 1 + branches;
 
-  // 루프 및 중첩 근사
   const loopCount = (code.match(/\b(for|while|forEach|map\(|reduce\()/g) || []).length;
   const nestedLoop = /\b(for|while)\s*\([^)]*\)\s*{[^{}]*\b(for|while)\s*\(/s.test(code);
   const tripleNested = /\b(for|while)[\s\S]{0,300}\b(for|while)[\s\S]{0,300}\b(for|while)/s.test(code);
   const loopDepthApprox = tripleNested ? 3 : nestedLoop ? 2 : loopCount > 0 ? 1 : 0;
 
-  // 정렬/분할정복/재귀 힌트
   const sortHint = /\b(sort\(|Collections\.sort|Arrays\.sort)\b/.test(code);
   const recursion =
     /function\s+([A-Za-z0-9_]+)\s*\([^)]*\)\s*{[\s\S]*?\b\1\s*\(/.test(code) ||
     /([A-Za-z0-9_]+)\s*=\s*\([^)]*\)\s*=>[\s\S]*?\b\1\s*\(/.test(code);
   const divideAndConquerHint = recursion && /\b(mid|merge|partition|divide|conquer)\b/i.test(code);
 
-  // 정규표현식 폭발 가능성
   const regexDosHint = /(a+)+|(\.\*){2,}|(.*){2,}/.test(code) && /(re\.compile|new\s+RegExp)/.test(code);
 
-  // 외부 호출/IO
   const externalCalls = (code.match(/\b(fetch|axios|request|http\.|https\.|jdbc|mongo|redis|sequelize|prisma)\b/gi) || [])
     .length;
   const ioCalls =
     (code.match(/\bfs\.(read|write|append|unlink|readdir|chmod|chown)|open\(|readFileSync|writeFileSync\b/gi) || [])
       .length;
 
-  // 메모리 바이트 근사
   let memBytesApprox = 0;
   const inc = (n: number) => { memBytesApprox += Math.max(0, n); };
 
@@ -617,18 +804,15 @@ function preciseResourceAndSecurityScan(
   const mapSet = (code.match(/\bnew\s+(Map|Set)\s*\(/g) || []).length;
   inc(mapSet * 128);
 
-  // 권한/민감도
   let permRisk = 0;
   if (/\b(child_process|exec\(|spawn\(|system\(|popen\(|subprocess\.)/i.test(code)) permRisk += 0.4;
   if (/\bfs\.(read|write|unlink|chmod|chown|readdir)\b/i.test(code)) permRisk += 0.3;
   if (/\bprocess\.env\b|secret|password|credential/i.test(lower)) permRisk += 0.3;
   permRisk = clamp01(permRisk);
 
-  // 라이브러리 평판 (예시)
   let libRep = 0.65;
   if (/vulnerable[_-]?pkg[_-]?2023/.test(lower)) libRep = Math.min(libRep, 0.1);
 
-  // Big-O 추정
   let bigO: BigOClass = "unknown";
   if (loopDepthApprox >= 3) bigO = "O(n^3)";
   else if (loopDepthApprox === 2) bigO = "O(n^2)";
@@ -636,12 +820,11 @@ function preciseResourceAndSecurityScan(
   else if (loopDepthApprox === 1 || recursion) bigO = "O(n)";
   else bigO = "unknown";
 
-  // CVE: 정규식 룰(DB) + 벡터(DB) 결합 (둘 다 JSON 근거만 사용)
+  // SD: 정규식 기반 + 벡터 기반 CVE 위험도 결합 → cveSeverity01
   const regexRules = regexHeuristicScoreFromDB(code, RULE_DB);
   const vectorRules = vectorCveScan(code);
   const cveSeverity01 = clamp01(1 - (1 - regexRules.severity01) * (1 - vectorRules.aggregatedSeverity01));
 
-  // 이유
   if (regexRules.matches.length) {
     reasons.push(...regexRules.matches.map((m) => `regex:${m.id} sev=${m.severity01.toFixed(2)}`));
   }
@@ -673,21 +856,21 @@ function preciseResourceAndSecurityScan(
   };
 }
 
-/* ---------- 정적 파이프라인 실행 ---------- */
+// 전체 정적 파이프라인을 실행해 StaticMetrics를 구성하는 메인 함수
+//  - SF: coreTouched, schemaChanged, (fallback 시) apiChanges/diffChangedLines, semanticF
+//  - SR: preciseResourceAndSecurityScan의 bigO, cc, mem, externalCalls, ioCalls
+//  - SD: preciseResourceAndSecurityScan의 cveSeverity01, libReputation01, permRisk01 등
 async function runStaticPipeline(code: string, filename: string | null | undefined, _language: string): Promise<StaticMetrics> {
   const lineCount = (code.match(/\n/g) || []).length + 1;
 
-  // 기능성(F) 근사
   const totalApis = Math.max(1, (code.match(/\bexport\s+(function|class|interface|type|const|let|var)\b/g) || []).length || 5);
   const coreTouched = !!filename && /(\/|^)(core|service|domain)\//i.test(filename);
   const diffChangedLines = Math.min(200, Math.round(lineCount * 0.2));
   const schemaChanged = /\b(ALTER\s+TABLE|CREATE\s+TABLE|DROP\s+TABLE|MIGRATION)\b/i.test(code);
 
-  // 정밀 리소스/보안
   const pr = preciseResourceAndSecurityScan(code);
 
   const metrics: StaticMetrics = {
-    // SF
     apiChanges: 0,
     totalApis,
     coreTouched,
@@ -695,7 +878,6 @@ async function runStaticPipeline(code: string, filename: string | null | undefin
     totalLines: Math.max(1, lineCount),
     schemaChanged,
 
-    // SR
     bigO: pr.bigO,
     cc: pr.cc,
     loopCount: pr.loopCount,
@@ -710,7 +892,6 @@ async function runStaticPipeline(code: string, filename: string | null | undefin
     externalCalls: pr.externalCalls,
     ioCalls: pr.ioCalls,
 
-    // SD
     cveSeverity01: pr.cveSeverity01,
     libReputation01: pr.libReputation01,
     licenseMismatch: pr.licenseMismatch,
@@ -719,21 +900,48 @@ async function runStaticPipeline(code: string, filename: string | null | undefin
     _reasons: pr._reasons
   };
 
+  try {
+    // SF: AST/호출 그래프 기반 Functionality 영향도(semanticF)를 계산해 StaticMetrics에 포함
+    const sem = computeFSignalsSemantic(code, _language);
+    if (sem) {
+      metrics.semanticF = {
+        score: sem.score,
+        impactedEntrypointRatio: sem.details.impactedEntrypointRatio ?? 0,
+        reachableNodesRatio: sem.details.reachableNodesRatio ?? 0,
+        centralityScore: sem.details.centralityScore ?? 0
+      };
+    }
+  } catch {
+  }
+
   return metrics;
 }
 
-/* ---------- 가중치 ---------- */
+// FRD 각각의 내부 세부 신호에 대한 가중치 설정
+//  - WF: SF(Functionality) 내부 신호(api/core/diff/schema) 비중 (semanticF 사용 시는 우선순위 낮음)
+//  - WR: SR(Resource) 내부 신호(Big-O, CC, 메모리, 외부/IO 호출) 비중
+//  - WD: SD(Dependency) 내부 신호(CVE, 평판, 라이선스, 권한) 비중
 const WF = { api: 0.40, core: 0.25, diff: 0.20, schema: 0.15 };
 const WR = { bigO: 0.32, cc: 0.18, mem: 0.22, ext: 0.18, io: 0.10 };
 const WD = { cve: 0.42, rep: 0.25, lic: 0.10, perm: 0.23 };
 
-/* ---- 차원 점수 계산 ---- */
+// StaticMetrics에서 F(Functionality) 차원 점수를 계산하는 함수
+//  → SF: semanticF.score(호출 그래프 기반)가 있으면 그것만 사용
+//       없으면 apiRatio, coreTouched, diffRatio, schemaChanged를 조합해 SF 산출
 function computeFSignalsFromMetrics(m: StaticMetrics) {
+  if (m.semanticF) {
+    const semanticOnly = m.semanticF.score;
+    return clamp01(semanticOnly);
+  }
+
   const apiRatio = clamp01(m.apiChanges / Math.max(1, m.totalApis));
   const diffRatio = clamp01(m.diffChangedLines / Math.max(1, m.totalLines));
   const v = apiRatio * WF.api + (m.coreTouched ? 1 : 0) * WF.core + diffRatio * WF.diff + (m.schemaChanged ? 1 : 0) * WF.schema;
   return clamp01(v);
 }
+
+// StaticMetrics에서 R(Resource) 차원 점수를 계산하는 함수
+//  → SR: 시간 복잡도(Big-O), CC, 메모리, 외부/IO 호출을 통합해 하나의 R 값으로 변환
 function computeRSignalsFromMetrics(m: StaticMetrics) {
   const bigO = mapBigOTo01(m.bigO);
   const ccNorm = clamp01(1 - Math.exp(-0.12 * Math.max(0, m.cc - 1)));
@@ -745,16 +953,21 @@ function computeRSignalsFromMetrics(m: StaticMetrics) {
   const v = bigO * WR.bigO + ccNorm * WR.cc + mem * WR.mem + ext * WR.ext + io * WR.io;
   return clamp01(v);
 }
+
+// StaticMetrics에서 D(Dependency) 차원 점수를 계산하는 함수
+//  → SD: CVE 위험도, 라이브러리 평판 역치, 라이선스 위배, 권한 위험을 통합해 D 값으로 변환
 function computeDSignalsFromMetrics(m: StaticMetrics) {
   const v = m.cveSeverity01 * WD.cve + (1 - m.libReputation01) * WD.rep + (m.licenseMismatch ? 1 : 0) * WD.lic + m.permRisk01 * WD.perm;
   return clamp01(v);
 }
 
-/* ---------- Static metrics → FRD 벡터 ---------- */
+// StaticMetrics를 FRD 벡터와 UI에 보여줄 신호 테이블로 변환하는 함수
+//  - vector: [SF, SR, SD]
+//  - signalTable.F/R/D: 각 차원의 내부 세부 신호들
 function analyzeFromStaticMetrics(metrics: StaticMetrics, filename?: string | null) {
-  const F = computeFSignalsFromMetrics(metrics);
-  const R = computeRSignalsFromMetrics(metrics);
-  const D = computeDSignalsFromMetrics(metrics);
+  const F = computeFSignalsFromMetrics(metrics); // SF
+  const R = computeRSignalsFromMetrics(metrics); // SR
+  const D = computeDSignalsFromMetrics(metrics); // SD
 
   const vector: [number, number, number] = [F, R, D];
 
@@ -763,7 +976,11 @@ function analyzeFromStaticMetrics(metrics: StaticMetrics, filename?: string | nu
       apiRatio: clamp01(metrics.apiChanges / Math.max(1, metrics.totalApis)),
       coreModuleModified: metrics.coreTouched ? 1 : 0,
       diffLineRatio: clamp01(metrics.diffChangedLines / Math.max(1, metrics.totalLines)),
-      schemaChanged: metrics.schemaChanged ? 1 : 0
+      schemaChanged: metrics.schemaChanged ? 1 : 0,
+      semanticScore: metrics.semanticF?.score ?? 0,
+      influencedEntrypoints: metrics.semanticF?.impactedEntrypointRatio ?? 0,
+      reachability: metrics.semanticF?.reachableNodesRatio ?? 0,
+      centrality: metrics.semanticF?.centralityScore ?? 0
     },
     R: {
       timeComplexity: mapBigOTo01(metrics.bigO),
@@ -785,24 +1002,30 @@ function analyzeFromStaticMetrics(metrics: StaticMetrics, filename?: string | nu
   return { vector, filename, signalTable, reasons: metrics._reasons };
 }
 
-/* ---------- CRAI 식(2) ---------- */
+// FRD 벡터를 최종 CRAI 점수 및 심각도로 변환하는 함수
+//  - 입력: v = [SF, SR, SD]
+//  - 출력: CRAI score(0~10), severity(red/orange/yellow/green), level 등
 function scoreFromVector(v: number[], top?: { wF: number; wR: number; wD: number }) {
   const cfg = top ?? { wF: 0.40, wR: 0.30, wD: 0.30 };
 
-  const SF = clamp01(v[0]);
-  const SR = clamp01(v[1]);
-  const SD = clamp01(v[2]);
+  const SF = clamp01(v[0]); // Functionality
+  const SR = clamp01(v[1]); // Resource
+  const SD = clamp01(v[2]); // Dependency
 
+  // B: 단순 가중 합 기반 CRAI 후보 (SF/SR/SD의 선형 결합)
   const B = 10 * (cfg.wF * SF + cfg.wR * SR + cfg.wD * SD);
 
+  // C: SD를 우선시하되, SD가 낮을 때는 SF/SR 영향도도 함께 고려하는 대체 스코어
   const wrSum = cfg.wF + cfg.wR;
   const mixFR = wrSum > 0 ? (cfg.wF / wrSum) * SF + (cfg.wR / wrSum) * SR : 0;
   const C = Math.min(10, 10 * (SD + (1 - SD) * mixFR));
 
+  // rho: FRD 중 SD 비중, s: SD가 어느 정도 이상일 때부터 C를 강조하는 smoothstep
   const rho = SD / (SF + SR + SD + 1e-6);
   const s = smoothstep(SD, 0.4, 0.7);
   const alpha = s * (0.5 + 0.5 * rho);
 
+  // 최종 CRAI: B와 C를 SD 중심 가중치(alpha)로 혼합
   const craiRaw = (1 - alpha) * B + alpha * C;
   const score = Math.min(10, craiRaw);
 
@@ -834,7 +1057,8 @@ function scoreFromVector(v: number[], top?: { wF: number; wR: number; wD: number
   };
 }
 
-/* ----- smoothstep 스무딩 함수 ----- */
+// CRAI에서 사용하는 부드러운 구간 전이(smoothstep) 함수
+//  → SD가 특정 구간(0.4~0.7)을 넘을 때 C에 대한 비중(alpha)을 점진적으로 키우기 위해 사용
 function smoothstep(x: number, a: number, b: number): number {
   if (x <= a) return 0;
   if (x >= b) return 1;
@@ -842,7 +1066,8 @@ function smoothstep(x: number, a: number, b: number): number {
   return t * t * (3 - 2 * t);
 }
 
-/* ---------- Filename hint ---------- */
+// Ollama 응답 문자열에서 파일명 힌트를 추출하는 함수
+//  → FRD와 직접적 연관은 없고, 승인 후 파일 저장 UX 개선용
 function detectSuggestedFileName(fullText: string, _fallbackLang?: string | null): string | null {
   const re =
     /(?:file\s*[:=]\s*|create\s*|\bmake\s*|\bsave\s*as\s*|\b파일(?:명|을)?\s*(?:은|을)?\s*)([A-Za-z0-9_\-./]+?\.[A-Za-z]{1,8})/gi;
@@ -861,7 +1086,8 @@ function detectSuggestedFileName(fullText: string, _fallbackLang?: string | null
   return last.replace(/^\/+/, "");
 }
 
-/** 마지막 코드블록 추출 (```lang\ncode```) — (레거시 호환용) */
+// 텍스트에서 마지막 코드블록 하나만 추출하는 (레거시) 함수
+//  → SF/SR/SD 분석 대상 코드를 뽑아내는 초기 버전 (현재는 extractCodeBlocksTS 사용)
 function extractLastCodeBlockTS(text: string): { language: string; code: string } | null {
   const regex = /```([\s\S]*?)```/g;
   let match: RegExpExecArray | null;
@@ -881,7 +1107,8 @@ function extractLastCodeBlockTS(text: string): { language: string; code: string 
   return { language: "plaintext", code: last };
 }
 
-/** 전체 코드블록 배열 추출 (```lang\ncode```) */
+// 텍스트에서 모든 ``` 코드블록을 추출해 Snippet 배열로 반환하는 함수
+//  → SF/SR/SD 분석 대상이 되는 여러 코드블록을 추출하는 현재 버전
 function extractCodeBlocksTS(text: string): Snippet[] {
   const blocks: Snippet[] = [];
   const regex = /```([\s\S]*?)```/g;
@@ -902,9 +1129,8 @@ function extractCodeBlocksTS(text: string): Snippet[] {
   return blocks;
 }
 
-/* ======================================================================
- *  승인 후 코드 적용 (단일/여러 스니펫)
- * ==================================================================== */
+// 단일 코드 스니펫 승인 후 파일/터미널에 반영하는 로직
+//  → FRD(CRAI) 결과를 사용자가 신뢰할 수 있을 때만 실제 시스템에 반영하는 Human-in-the-loop 부분
 async function handleApproval(code: string, language: string, suggested?: string | null) {
   if (!vscode.workspace.workspaceFolders?.length) {
     vscode.window.showErrorMessage("워크스페이스가 열려 있지 않습니다.");
@@ -980,15 +1206,15 @@ async function handleApproval(code: string, language: string, suggested?: string
   await ensureParentDir(root, targetRel);
   const fileUri = vscode.Uri.joinPath(root, targetRel);
 
-  const enc = new TextEncoder();
-  await vscode.workspace.fs.writeFile(fileUri, enc.encode(code));
+  await vscode.workspace.fs.writeFile(fileUri, new TextEncoder().encode(code));
   vscode.window.showInformationMessage(`승인됨 → ${targetRel} 저장 완료`);
 
   const doc = await vscode.workspace.openTextDocument(fileUri);
   await vscode.window.showTextDocument(doc);
 }
 
-/** 여러 스니펫 일괄 승인 */
+// 여러 코드 스니펫을 한 번에 승인/저장하는 로직
+//  → 여러 SF/SR/SD 분석 결과를 한 번에 반영할 때 사용하는 UX 레이어
 async function handleApprovalMany(snippets: Snippet[]) {
   if (!vscode.workspace.workspaceFolders?.length) {
     vscode.window.showErrorMessage("워크스페이스가 열려 있지 않습니다.");
@@ -1053,7 +1279,7 @@ async function handleApprovalMany(snippets: Snippet[]) {
   }
 }
 
-/* --- 활성 에디터 전체 덮어쓰기 --- */
+// 활성 에디터 전체 내용을 생성된 코드로 덮어쓰는 함수 (FRD/CRAI 검증 후 실제 코드 반영 경로 중 하나)
 async function overwriteActiveEditor(code: string): Promise<vscode.Uri | null> {
   const editor = vscode.window.activeTextEditor;
   if (!editor) {
@@ -1074,11 +1300,11 @@ async function overwriteActiveEditor(code: string): Promise<vscode.Uri | null> {
   return doc.uri;
 }
 
-/* --- 커서 위치 삽입 --- */
+// 현재 커서 위치에 코드를 삽입하는 함수 (FRD/CRAI 검증 후 반영 옵션)
 async function insertAtCursor(code: string): Promise<vscode.Uri | null> {
   const editor = vscode.window.activeTextEditor;
   if (!editor) {
-    vscode.window.showErrorMessage("활성 텍스트 에디터가 없습니다.");
+    vscode.window.showErrorMessage("활성 에디터가 없습니다.");
     return null;
   }
   const doc = editor.document;
@@ -1092,7 +1318,7 @@ async function insertAtCursor(code: string): Promise<vscode.Uri | null> {
   return doc.uri;
 }
 
-/* ---------- Fs utils ---------- */
+// 언어 이름을 기반으로 파일 확장자를 추정하는 함수 (FRD와 직접 연관 x, 승인 UX용)
 function guessExtension(language: string): string {
   const map: Record<string, string> = {
     javascript: "js",
@@ -1115,12 +1341,14 @@ function guessExtension(language: string): string {
   return map[key] || (key.match(/^[a-z0-9]+$/) ? key : "txt");
 }
 
+// 상대 경로에서 보안상 위험한 요소를 제거하는 함수 (FRD와 직접 연관 x, 파일 시스템 보호)
 function sanitizeRelativePath(p?: string | null): string | null {
   if (!p) return null;
   if (p.includes("..")) return null;
   return p.replace(/^\/+/, "").trim();
 }
 
+// 자동 파일 이름을 생성하는 함수 (중복 방지, 승인 UX용)
 async function nextAutoName(root: vscode.Uri, ext: string): Promise<string> {
   const base = "generated_code";
   for (let i = 1; i <= 9999; i++) {
@@ -1135,6 +1363,7 @@ async function nextAutoName(root: vscode.Uri, ext: string): Promise<string> {
   return `${base}_${Date.now()}.${ext}`;
 }
 
+// 파일 저장을 위해 상위 디렉터리를 먼저 생성하는 함수 (FRD와 직접 연관 x, 파일 I/O 유틸)
 async function ensureParentDir(root: vscode.Uri, relPath: string) {
   const parts = relPath.split("/").slice(0, -1);
   if (!parts.length) return;
@@ -1149,7 +1378,8 @@ async function ensureParentDir(root: vscode.Uri, relPath: string) {
   }
 }
 
-/* ---------- HTML / Nonce ---------- */
+// Webview HTML 템플릿을 구성하는 함수 (UI 레이아웃 정의)
+//  → SF/SR/SD 값과 CRAI 점수를 사용자에게 시각적으로 보여주는 컨테이너 (실제 계산은 extension.ts)
 function getHtml(webview: vscode.Webview, ctx: vscode.ExtensionContext, nonce: string): string {
   const base = vscode.Uri.joinPath(ctx.extensionUri, "src", "webview");
   const js = webview.asWebviewUri(vscode.Uri.joinPath(base, "main.js"));
@@ -1261,9 +1491,11 @@ function getHtml(webview: vscode.Webview, ctx: vscode.ExtensionContext, nonce: s
 </html>`;
 }
 
+// CSP nonce 생성을 위한 랜덤 문자열 생성 함수 (보안용, FRD와 직접 연관 x)
 function getNonce() {
   const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
   return Array.from({ length: 32 }, () => chars[Math.floor(Math.random() * chars.length)]).join("");
 }
 
+// VS Code 확장 비활성화 시 호출되는 훅 (정리용, FRD와 직접 연관 x)
 export function deactivate() {}

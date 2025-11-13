@@ -39,6 +39,7 @@ exports.deactivate = deactivate;
 const vscode = __importStar(require("vscode"));
 const fs = __importStar(require("fs"));
 const path = __importStar(require("path"));
+const ts = __importStar(require("typescript"));
 /**
  * AI Approval Agent (CRAI 식 적용 + 정적 분석 기반 SF/SR/SD 산출)
  *
@@ -47,6 +48,8 @@ const path = __importStar(require("path"));
  *    를 동적으로 로딩하여 실제 데이터 기반 위험도(CVE) 점수를 계산.
  *  - 고정 vocab/하드코딩 삭제. 코사인(벡터)와 정규식 휴리스틱(룰 DB)을 모두 JSON에서만 읽어 사용.
  *  - DB가 없으면 해당 점수는 0으로 처리(동작은 유지, 로그 경고).
+ *  - SF(Functionality)는 키워드 매칭이 아닌 의미 기반(AST→호출그래프) 영향도로 계산하며,
+ *    TS/JS에서 우선 적용, 기타 언어는 기존 방식으로 폴백.
  */
 // ─────────────────────────────────────────────────────────────────────────────
 // 0) 확장 활성화
@@ -483,6 +486,164 @@ function regexHeuristicScoreFromDB(code, db) {
         matches: results.filter((r) => r.severity01 > 0.15).slice(0, 5)
     };
 }
+function isProbableEntrypoint(name, isExported, fileText) {
+    if (isExported)
+        return true; // 외부 공개는 우선 엔트리
+    // 라우팅/핸들러 패턴(역할 기반 힌트)
+    if (/\b(app|router)\.(get|post|put|delete|patch)\s*\(/.test(fileText))
+        return true;
+    if (/\bexport\s+default\b/.test(fileText) && /handler|route|loader/i.test(name))
+        return true;
+    return false;
+}
+function buildCallGraphFromTS(code, virtFileName = "snippet.ts") {
+    const src = ts.createSourceFile(virtFileName, code, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+    const cg = {
+        nodes: new Set(),
+        edges: new Map(),
+        indeg: new Map(),
+        outdeg: new Map(),
+        entrypoints: new Set(),
+        changed: new Set(),
+    };
+    const fileText = code;
+    const decls = [];
+    const idOf = (name) => `${virtFileName}::${name}`;
+    const addNode = (id) => {
+        cg.nodes.add(id);
+        if (!cg.edges.has(id))
+            cg.edges.set(id, new Set());
+        if (!cg.indeg.has(id))
+            cg.indeg.set(id, 0);
+        if (!cg.outdeg.has(id))
+            cg.outdeg.set(id, 0);
+    };
+    const addEdge = (from, to) => {
+        addNode(from);
+        addNode(to);
+        const s = cg.edges.get(from);
+        if (!s.has(to)) {
+            s.add(to);
+            cg.outdeg.set(from, (cg.outdeg.get(from) || 0) + 1);
+            cg.indeg.set(to, (cg.indeg.get(to) || 0) + 1);
+        }
+    };
+    // 선언 수집
+    const visitDecl = (node) => {
+        if (ts.isFunctionDeclaration(node) && node.name) {
+            const name = node.name.getText(src);
+            const isExported = node.modifiers?.some(m => m.kind === ts.SyntaxKind.ExportKeyword) ?? false;
+            decls.push({ id: idOf(name), name, isExported, node });
+        }
+        else if (ts.isVariableStatement(node)) {
+            const isExported = node.modifiers?.some(m => m.kind === ts.SyntaxKind.ExportKeyword) ?? false;
+            node.declarationList.declarations.forEach(d => {
+                const name = d.name.getText(src);
+                if (d.initializer && (ts.isFunctionExpression(d.initializer) || ts.isArrowFunction(d.initializer))) {
+                    decls.push({ id: idOf(name), name, isExported, node: d.initializer });
+                }
+            });
+        }
+        else if (ts.isClassDeclaration(node) && node.name) {
+            const name = node.name.getText(src);
+            const isExported = node.modifiers?.some(m => m.kind === ts.SyntaxKind.ExportKeyword) ?? false;
+            decls.push({ id: idOf(name), name, isExported, node });
+        }
+        ts.forEachChild(node, visitDecl);
+    };
+    visitDecl(src);
+    // 엔트리포인트 판정
+    decls.forEach(d => {
+        addNode(d.id);
+        if (isProbableEntrypoint(d.name, d.isExported, fileText))
+            cg.entrypoints.add(d.id);
+    });
+    // 호출 간선 수집
+    const nameToId = new Map();
+    decls.forEach(d => nameToId.set(d.name, d.id));
+    const collectCallsIn = (node, current) => {
+        if (ts.isCallExpression(node)) {
+            let calleeName = "";
+            if (ts.isIdentifier(node.expression)) {
+                calleeName = node.expression.text;
+            }
+            else if (ts.isPropertyAccessExpression(node.expression) && ts.isIdentifier(node.expression.name)) {
+                calleeName = node.expression.name.text;
+            }
+            if (calleeName && current && nameToId.has(calleeName)) {
+                addEdge(current, nameToId.get(calleeName));
+            }
+        }
+        ts.forEachChild(node, n => collectCallsIn(n, current));
+    };
+    decls.forEach(d => collectCallsIn(d.node, d.id));
+    // 이번 스니펫 내 선언 = 변경 세트
+    decls.forEach(d => cg.changed.add(d.id));
+    return cg;
+}
+function forwardReachable(cg, fromSet) {
+    const seen = new Set();
+    const stack = [...fromSet];
+    while (stack.length) {
+        const u = stack.pop();
+        if (seen.has(u))
+            continue;
+        seen.add(u);
+        const outs = cg.edges.get(u) || new Set();
+        outs.forEach(v => { if (!seen.has(v))
+            stack.push(v); });
+    }
+    return seen;
+}
+function anyPathToEntrypoint(cg, fromSet, entry) {
+    const reach = forwardReachable(cg, fromSet);
+    return reach.has(entry);
+}
+function centralityApprox(cg, nodes) {
+    // 근사: (inDeg + outDeg) 평균을 전역 평균 대비 정규화
+    let acc = 0;
+    nodes.forEach(n => { acc += (cg.indeg.get(n) || 0) + (cg.outdeg.get(n) || 0); });
+    const localAvg = nodes.size ? acc / nodes.size : 0;
+    let total = 0;
+    cg.nodes.forEach(n => { total += (cg.indeg.get(n) || 0) + (cg.outdeg.get(n) || 0); });
+    const globalAvg = cg.nodes.size ? total / cg.nodes.size : 1;
+    const raw = globalAvg ? (localAvg / (globalAvg * 2)) : 0; // 보수적 스케일
+    return clamp01(raw);
+}
+function computeFSignalsSemantic(code, language) {
+    const lang = (language || "").toLowerCase();
+    if (!(lang.includes("ts") || lang.includes("js") || lang === "plaintext"))
+        return null;
+    let cg;
+    try {
+        cg = buildCallGraphFromTS(code);
+    }
+    catch {
+        return null;
+    }
+    if (cg.nodes.size === 0)
+        return { score: 0, details: { reason: "no nodes" } };
+    const reach = forwardReachable(cg, cg.changed);
+    const reachableNodesRatio = Math.min(1, reach.size / Math.max(1, cg.nodes.size));
+    let impactedEntrypoints = 0;
+    cg.entrypoints.forEach(ep => { if (anyPathToEntrypoint(cg, cg.changed, ep))
+        impactedEntrypoints++; });
+    const totalEntrypoints = Math.max(1, cg.entrypoints.size || 1);
+    const impactedEntrypointRatio = Math.min(1, impactedEntrypoints / totalEntrypoints);
+    const centralityScore = centralityApprox(cg, cg.changed);
+    const w1 = 0.5, w2 = 0.3, w3 = 0.2;
+    const score = clamp01(w1 * impactedEntrypointRatio + w2 * reachableNodesRatio + w3 * centralityScore);
+    return {
+        score,
+        details: {
+            impactedEntrypointRatio: Number(impactedEntrypointRatio.toFixed(3)),
+            reachableNodesRatio: Number(reachableNodesRatio.toFixed(3)),
+            centralityScore: Number(centralityScore.toFixed(3)),
+            nodes: cg.nodes.size,
+            entrypoints: cg.entrypoints.size
+        }
+    };
+}
 const clamp01 = (x) => Math.max(0, Math.min(1, x));
 function mapBigOTo01(bigO) {
     const lut = {
@@ -606,7 +767,7 @@ function preciseResourceAndSecurityScan(code) {
 /* ---------- 정적 파이프라인 실행 ---------- */
 async function runStaticPipeline(code, filename, _language) {
     const lineCount = (code.match(/\n/g) || []).length + 1;
-    // 기능성(F) 근사
+    // 기능성(F) 근사 — 기존(키워드 기반) 입력값
     const totalApis = Math.max(1, (code.match(/\bexport\s+(function|class|interface|type|const|let|var)\b/g) || []).length || 5);
     const coreTouched = !!filename && /(\/|^)(core|service|domain)\//i.test(filename);
     const diffChangedLines = Math.min(200, Math.round(lineCount * 0.2));
@@ -614,7 +775,7 @@ async function runStaticPipeline(code, filename, _language) {
     // 정밀 리소스/보안
     const pr = preciseResourceAndSecurityScan(code);
     const metrics = {
-        // SF
+        // SF (기초)
         apiChanges: 0,
         totalApis,
         coreTouched,
@@ -641,6 +802,19 @@ async function runStaticPipeline(code, filename, _language) {
         permRisk01: pr.permRisk01,
         _reasons: pr._reasons
     };
+    // 의미 기반 SF(호출그래프) 시도 — TS/JS에서만 계산, 실패 시 그냥 생략
+    try {
+        const sem = computeFSignalsSemantic(code, _language);
+        if (sem) {
+            metrics.semanticF = {
+                score: sem.score,
+                impactedEntrypointRatio: sem.details.impactedEntrypointRatio ?? 0,
+                reachableNodesRatio: sem.details.reachableNodesRatio ?? 0,
+                centralityScore: sem.details.centralityScore ?? 0
+            };
+        }
+    }
+    catch { /* ignore semantic errors */ }
     return metrics;
 }
 /* ---------- 가중치 ---------- */
@@ -649,6 +823,12 @@ const WR = { bigO: 0.32, cc: 0.18, mem: 0.22, ext: 0.18, io: 0.10 };
 const WD = { cve: 0.42, rep: 0.25, lic: 0.10, perm: 0.23 };
 /* ---- 차원 점수 계산 ---- */
 function computeFSignalsFromMetrics(m) {
+    // 의미 기반 점수가 있으면 우선 사용 (키워드 매칭 탈피)
+    if (m.semanticF) {
+        const semanticOnly = m.semanticF.score; // 0..1
+        return clamp01(semanticOnly);
+    }
+    // 폴백: 기존 키워드 기반
     const apiRatio = clamp01(m.apiChanges / Math.max(1, m.totalApis));
     const diffRatio = clamp01(m.diffChangedLines / Math.max(1, m.totalLines));
     const v = apiRatio * WF.api + (m.coreTouched ? 1 : 0) * WF.core + diffRatio * WF.diff + (m.schemaChanged ? 1 : 0) * WF.schema;
@@ -680,7 +860,12 @@ function analyzeFromStaticMetrics(metrics, filename) {
             apiRatio: clamp01(metrics.apiChanges / Math.max(1, metrics.totalApis)),
             coreModuleModified: metrics.coreTouched ? 1 : 0,
             diffLineRatio: clamp01(metrics.diffChangedLines / Math.max(1, metrics.totalLines)),
-            schemaChanged: metrics.schemaChanged ? 1 : 0
+            schemaChanged: metrics.schemaChanged ? 1 : 0,
+            // 의미 기반 지표 노출
+            semanticScore: metrics.semanticF?.score ?? 0,
+            influencedEntrypoints: metrics.semanticF?.impactedEntrypointRatio ?? 0,
+            reachability: metrics.semanticF?.reachableNodesRatio ?? 0,
+            centrality: metrics.semanticF?.centralityScore ?? 0
         },
         R: {
             timeComplexity: mapBigOTo01(metrics.bigO),
@@ -958,7 +1143,7 @@ async function overwriteActiveEditor(code) {
 async function insertAtCursor(code) {
     const editor = vscode.window.activeTextEditor;
     if (!editor) {
-        vscode.window.showErrorMessage("활성 텍스트 에디터가 없습니다.");
+        vscode.window.showErrorMessage("활성 에디터가 없습니다.");
         return null;
     }
     const doc = editor.document;
