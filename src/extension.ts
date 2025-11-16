@@ -8,7 +8,7 @@ import * as ts from "typescript";
 export function activate(context: vscode.ExtensionContext) {
   console.log("AI Approval Agent is now active!");
 
-  // SD: CVE 룰 DB 로드(정규식 기반) → Dependency 위험(SD)에 사용
+  // SD: CVE 룰 DB 로드(정규식 기반) → Dependability 위험(SD)에 사용
   RULE_DB = loadGeneratedRuleDb(context);
   if (RULE_DB.length) {
     console.log(`[CVE] Loaded generated RULE DB: ${RULE_DB.length} signature(s)`);
@@ -16,7 +16,7 @@ export function activate(context: vscode.ExtensionContext) {
     console.warn("[CVE] WARNING: generated_cve_rules.json not found or empty. Regex scoring -> 0");
   }
 
-  // SD: CVE 벡터 DB 로드(코사인 기반) → Dependency 위험(SD)에 사용
+  // SD: CVE 벡터 DB 로드(코사인 기반) → Dependability 위험(SD)에 사용
   DYN_CVE_DB = loadGeneratedCveDb(context);
   if (DYN_CVE_DB.length) {
     console.log(`[CVE] Loaded generated VECTOR DB: ${DYN_CVE_DB.length} signature(s)`);
@@ -68,7 +68,7 @@ function getCfg() {
     model: cfg.get<string>("aiApproval.ollama.model") || "llama3.1:8b",
     wF: cfg.get<number>("aiApproval.weights.functionality") ?? 0.40, // SF 가중치
     wR: cfg.get<number>("aiApproval.weights.resource") ?? 0.30,      // SR 가중치
-    wD: cfg.get<number>("aiApproval.weights.dependency") ?? 0.30     // SD 가중치
+    wD: cfg.get<number>("aiApproval.weights.dependability") ?? 0.30     // SD 가중치
   };
 }
 
@@ -82,7 +82,7 @@ function wireMessages(webview: vscode.Webview) {
         case "approve": {
           const { mode } = msg || {};
 
-          // SD 결과(Dependency 위험)에 의해 점수가 높아져 severity가 red인 경우, CONFIRM 게이트 (CRAI 결과 기반 게이트)
+          // SD 결과(Dependability 위험)에 의해 점수가 높아져 severity가 red인 경우, CONFIRM 게이트 (CRAI 결과 기반 게이트)
           if (msg?.severity === "red") {
             const input = await vscode.window.showInputBox({
               prompt: `High risk (${msg?.score}). Type 'CONFIRM' to continue.`,
@@ -165,7 +165,7 @@ function wireMessages(webview: vscode.Webview) {
             // ★ analyzeFromStaticMetrics:
             //   - SF: F 값 (Functionality)
             //   - SR: R 값 (Resource)
-            //   - SD: D 값 (Dependency)
+            //   - SD: D 값 (Dependability)
             const heur = analyzeFromStaticMetrics(metrics, globalSuggested);
             const fusedVector = heur.vector; // [SF, SR, SD]
 
@@ -276,7 +276,7 @@ async function chatWithOllamaAndReturn(
 }
 
 // CVE 정규식 룰 DB, 토크나이저 룰, 벡터 시그니처 타입 정의
-//  → Dependency 차원(SD)에서 취약점 및 의존성 위험을 수치화하기 위한 구조
+//  → Dependability 차원(SD)에서 취약점 및 의존성 위험을 수치화하기 위한 구조
 type Rule = { rx: string; w: number; note?: string; token?: string; support?: number; idf?: number };
 type TokenizerRule = { name?: string; rx: string; w?: number };
 type Sig = {
@@ -301,7 +301,7 @@ type CveVectorSig = {
   token_regex?: TokenizerRule[];
 };
 
-// 동적으로 로드된 CVE 룰/벡터 DB 전역 상태 (SD: Dependency 위험 계산용 핵심 데이터)
+// 동적으로 로드된 CVE 룰/벡터 DB 전역 상태 (SD: Dependability 위험 계산용 핵심 데이터)
 let RULE_DB: Sig[] = [];
 let DYN_CVE_DB: CveVectorSig[] = [];
 
@@ -338,7 +338,7 @@ function loadGeneratedCveDb(ctx?: vscode.ExtensionContext): CveVectorSig[] {
   }
 }
 
-// 현재 사용 가능한 벡터 DB를 반환하는 헬퍼 (SD: Dependency 위험 계산에서 사용하는 시그니처 집합)
+// 현재 사용 가능한 벡터 DB를 반환하는 헬퍼 (SD: Dependability 위험 계산에서 사용하는 시그니처 집합)
 function getSigDB(): CveVectorSig[] {
   return Array.isArray(DYN_CVE_DB) ? DYN_CVE_DB : [];
 }
@@ -365,7 +365,7 @@ function collectTokenizerPatterns() {
 }
 
 // 코드 문자열을 CVE 토큰 벡터(가중치 포함)로 변환하는 함수
-//  → SD: 코드에서 발견된 취약점 관련 토큰을 벡터로 표현하여 Dependency 위험(SD) 계산에 사용
+//  → SD: 코드에서 발견된 취약점 관련 토큰을 벡터로 표현하여 Dependability 위험(SD) 계산에 사용
 function vectorizeCodeToTokens(code: string): Record<string, number> {
   const lower = code.toLowerCase();
   const feats: Record<string, number> = {};
@@ -400,7 +400,7 @@ function vectorizeCodeToTokens(code: string): Record<string, number> {
 }
 
 // 두 벡터 간 코사인 유사도를 계산하는 함수
-//  → SD: 코드 토큰 벡터 vs CVE 시그니처 벡터 유사도를 통해 Dependency 위험 정도 추정
+//  → SD: 코드 토큰 벡터 vs CVE 시그니처 벡터 유사도를 통해 Dependability 위험 정도 추정
 function cosineSim(a: Record<string, number>, b: Record<string, number>): number {
   let dot = 0, na = 0, nb = 0;
   const keys = new Set([...Object.keys(a), ...Object.keys(b)]);
@@ -747,7 +747,7 @@ const sat01 = (x: number, k: number) => clamp01(1 - Math.exp(-k * Math.max(0, x)
 // 시간/공간 복잡도, 외부 호출, 권한 등을 정밀하게 스캔하는 함수
 //  → SR: bigO, cc, loop, memAllocs, memBytesApprox, externalCalls, ioCalls
 //  → SD: cveSeverity01, libReputation01, permRisk01, licenseMismatch
-//  (즉, Resource(SR) + Dependency(SD) 차원에 대한 정밀 스캐너)
+//  (즉, Resource(SR) + Dependability (SD) 차원에 대한 정밀 스캐너)
 function preciseResourceAndSecurityScan(
   code: string
 ): Omit<
@@ -920,7 +920,7 @@ async function runStaticPipeline(code: string, filename: string | null | undefin
 // FRD 각각의 내부 세부 신호에 대한 가중치 설정
 //  - WF: SF(Functionality) 내부 신호(api/core/diff/schema) 비중 (semanticF 사용 시는 우선순위 낮음)
 //  - WR: SR(Resource) 내부 신호(Big-O, CC, 메모리, 외부/IO 호출) 비중
-//  - WD: SD(Dependency) 내부 신호(CVE, 평판, 라이선스, 권한) 비중
+//  - WD: SD(Dependability) 내부 신호(CVE, 평판, 라이선스, 권한) 비중
 const WF = { api: 0.40, core: 0.25, diff: 0.20, schema: 0.15 };
 const WR = { bigO: 0.32, cc: 0.18, mem: 0.22, ext: 0.18, io: 0.10 };
 const WD = { cve: 0.42, rep: 0.25, lic: 0.10, perm: 0.23 };
@@ -954,7 +954,7 @@ function computeRSignalsFromMetrics(m: StaticMetrics) {
   return clamp01(v);
 }
 
-// StaticMetrics에서 D(Dependency) 차원 점수를 계산하는 함수
+// StaticMetrics에서 D(Dependability) 차원 점수를 계산하는 함수
 //  → SD: CVE 위험도, 라이브러리 평판 역치, 라이선스 위배, 권한 위험을 통합해 D 값으로 변환
 function computeDSignalsFromMetrics(m: StaticMetrics) {
   const v = m.cveSeverity01 * WD.cve + (1 - m.libReputation01) * WD.rep + (m.licenseMismatch ? 1 : 0) * WD.lic + m.permRisk01 * WD.perm;
@@ -1010,7 +1010,7 @@ function scoreFromVector(v: number[], top?: { wF: number; wR: number; wD: number
 
   const SF = clamp01(v[0]); // Functionality
   const SR = clamp01(v[1]); // Resource
-  const SD = clamp01(v[2]); // Dependency
+  const SD = clamp01(v[2]); // Dependability
 
   // B: 단순 가중 합 기반 CRAI 후보 (SF/SR/SD의 선형 결합)
   const B = 10 * (cfg.wF * SF + cfg.wR * SR + cfg.wD * SD);
