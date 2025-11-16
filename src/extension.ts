@@ -32,7 +32,7 @@ export function activate(context: vscode.ExtensionContext) {
     })
   );
 
-  // 패널 오픈 명령 등록 (UI용, FRD 계산과 직접적 연관은 없음)
+  // 패널 오픈 명령 등록 (UI용)
   context.subscriptions.push(
     vscode.commands.registerCommand("ai-approval-agent.showPanel", () => {
       vscode.window.showInformationMessage("AI Approval Panel opened!");
@@ -1318,7 +1318,7 @@ async function insertAtCursor(code: string): Promise<vscode.Uri | null> {
   return doc.uri;
 }
 
-// 언어 이름을 기반으로 파일 확장자를 추정하는 함수 (FRD와 직접 연관 x, 승인 UX용)
+// 언어 이름을 기반으로 파일 확장자를 추정하는 함수 (승인 UX용)
 function guessExtension(language: string): string {
   const map: Record<string, string> = {
     javascript: "js",
@@ -1341,7 +1341,7 @@ function guessExtension(language: string): string {
   return map[key] || (key.match(/^[a-z0-9]+$/) ? key : "txt");
 }
 
-// 상대 경로에서 보안상 위험한 요소를 제거하는 함수 (FRD와 직접 연관 x, 파일 시스템 보호)
+// 상대 경로에서 보안상 위험한 요소를 제거하는 함수 (파일 시스템 보호)
 function sanitizeRelativePath(p?: string | null): string | null {
   if (!p) return null;
   if (p.includes("..")) return null;
@@ -1363,7 +1363,7 @@ async function nextAutoName(root: vscode.Uri, ext: string): Promise<string> {
   return `${base}_${Date.now()}.${ext}`;
 }
 
-// 파일 저장을 위해 상위 디렉터리를 먼저 생성하는 함수 (FRD와 직접 연관 x, 파일 I/O 유틸)
+// 파일 저장을 위해 상위 디렉터리를 먼저 생성하는 함수 (파일 I/O 유틸)
 async function ensureParentDir(root: vscode.Uri, relPath: string) {
   const parts = relPath.split("/").slice(0, -1);
   if (!parts.length) return;
@@ -1491,11 +1491,11 @@ function getHtml(webview: vscode.Webview, ctx: vscode.ExtensionContext, nonce: s
 </html>`;
 }
 
-// CSP nonce 생성을 위한 랜덤 문자열 생성 함수 (보안용, FRD와 직접 연관 x)
+// CSP nonce 생성을 위한 랜덤 문자열 생성 함수 (보안용)
 function getNonce() {
   const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
   return Array.from({ length: 32 }, () => chars[Math.floor(Math.random() * chars.length)]).join("");
 }
 
-// VS Code 확장 비활성화 시 호출되는 훅 (정리용, FRD와 직접 연관 x)
+// VS Code 확장 비활성화 시 호출되는 훅 (정리용)
 export function deactivate() {}
